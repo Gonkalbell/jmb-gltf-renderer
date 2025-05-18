@@ -128,7 +128,7 @@ impl SceneRenderer {
             .expect("Failed to find skybox texture");
         let mut image = Vec::with_capacity(ktx_reader.data().len());
         for level in ktx_reader.levels() {
-            image.extend_from_slice(level);
+            image.extend_from_slice(level.data);
         }
         let ktx_header = ktx_reader.header();
         let skybox_tex = device.create_texture_with_data(
