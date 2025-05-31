@@ -19,7 +19,7 @@ ktx2 = "0.4"
 log = "0.4"
 puffin = { version = "0.19.1", features = ["web"] }
 puffin_http = "0.16.1"
-reqwest = { version = "0.12.12", features = ["json"] }
+reqwest = { version = "0.12.18", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "23.0.1"
