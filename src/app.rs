@@ -24,7 +24,7 @@ impl RendererApp {
             .write()
             .callback_resources
             .insert(SceneRenderer::init(
-                wgpu_render_state.device.clone(),
+                &wgpu_render_state.device,
                 &wgpu_render_state.queue,
                 wgpu_render_state.target_format,
             ));

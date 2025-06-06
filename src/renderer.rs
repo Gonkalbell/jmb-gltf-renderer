@@ -4,14 +4,13 @@ mod gltf_loader;
 #[allow(clippy::all)]
 mod shaders;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use eframe::wgpu;
-use egui::ahash::HashMap;
+use egui::{ahash::HashMap};
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
-use tokio::sync::Mutex;
 use wgpu::util::DeviceExt;
 
 use camera::ArcBallCamera;
@@ -23,9 +22,9 @@ const ASSETS_BASE_URL: &str =
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-type CameraBindGroup = skybox::WgpuBindGroup0;
-type CameraBindGroupEntries<'a> = skybox::WgpuBindGroup0Entries<'a>;
-type CameraBindGroupEntriesParams<'a> = skybox::WgpuBindGroup0EntriesParams<'a>;
+type CameraBindGroup = bgroup_camera::WgpuBindGroup0;
+type CameraBindGroupEntries<'a> = bgroup_camera::WgpuBindGroup0Entries<'a>;
+type CameraBindGroupEntriesParams<'a> = bgroup_camera::WgpuBindGroup0EntriesParams<'a>;
 
 type NodeBindGroup = scene::WgpuBindGroup1;
 type NodeBindGroupEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
@@ -96,7 +95,7 @@ struct ModelLinkInfo {
 
 impl SceneRenderer {
     pub fn init(
-        device: Arc<wgpu::Device>,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
     ) -> Self {
@@ -157,7 +156,7 @@ impl SceneRenderer {
         });
 
         let skybox_bgroup = SkyboxBindGroup::from_bindings(
-            &device,
+            device,
             SkyboxBindGroupEntries::new(SkyboxBindGroupEntriesParams {
                 res_texture: &skybox_tview,
                 res_sampler: &device.create_sampler(&wgpu::SamplerDescriptor {
@@ -202,6 +201,7 @@ impl SceneRenderer {
 
         let scene = Arc::new(Mutex::new(None));
         let scene_clone = scene.clone();
+        let device = device.clone();
         crate::spawn(async move {
             let url = Url::parse(ASSETS_BASE_URL)
                 .unwrap()
@@ -210,7 +210,7 @@ impl SceneRenderer {
             let loaded_scene = gltf_loader::load_asset(url, &device, color_format)
                 .await
                 .unwrap();
-            scene_clone.lock().await.replace(loaded_scene);
+            scene_clone.lock().unwrap().replace(loaded_scene);
         });
 
         // Load the asset list
@@ -227,7 +227,7 @@ impl SceneRenderer {
                 .into_iter()
                 .filter(|m| m.tags.iter().any(|t| *t == "core"))
                 .collect();
-            *asset_list_clone.lock().await = req;
+            *asset_list_clone.lock().unwrap() = req;
         });
 
         Self {
@@ -272,28 +272,26 @@ impl SceneRenderer {
         self.camera_bgroup.set(rpass);
 
         let scene_lock = self.scene.try_lock();
-        if let Ok(scene_guard) = scene_lock {
-            if let Some(scene) = scene_guard.as_ref() {
-                for node in &scene.nodes {
-                    node.bgroup.set(rpass);
-                    let mesh = scene
-                        .meshes
-                        .get(node.mesh_index)
-                        .expect("Node didn't have a mesh");
-                    for primitive in &mesh.primitives {
-                        rpass.set_pipeline(&primitive.pipeline);
-                        for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
-                            rpass.set_vertex_buffer(i as _, attrib.buffer.slice(attrib.offset..));
-                        }
-                        if let Some(index_data) = &primitive.index_data {
-                            rpass.set_index_buffer(
-                                index_data.buffer.slice(index_data.offset..),
-                                index_data.format,
-                            );
-                            rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);
-                        } else {
-                            rpass.draw(0..primitive.draw_count, 0..1);
-                        }
+        if let Ok(Some(scene)) = scene_lock.as_ref().map(|x| x.as_ref()) {
+            for node in &scene.nodes {
+                node.bgroup.set(rpass);
+                let mesh = scene
+                    .meshes
+                    .get(node.mesh_index)
+                    .expect("Node didn't have a mesh");
+                for primitive in &mesh.primitives {
+                    rpass.set_pipeline(&primitive.pipeline);
+                    for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
+                        rpass.set_vertex_buffer(i as _, attrib.buffer.slice(attrib.offset..));
+                    }
+                    if let Some(index_data) = &primitive.index_data {
+                        rpass.set_index_buffer(
+                            index_data.buffer.slice(index_data.offset..),
+                            index_data.format,
+                        );
+                        rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);
+                    } else {
+                        rpass.draw(0..primitive.draw_count, 0..1);
                     }
                 }
             }
@@ -307,7 +305,7 @@ impl SceneRenderer {
     pub fn run_ui(
         &mut self,
         ctx: &egui::Context,
-        device: &Arc<wgpu::Device>,
+        device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
     ) {
         profile_function!();
@@ -321,42 +319,45 @@ impl SceneRenderer {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("Scene", |ui| {
-                    if let Ok(model_list) = self.asset_list.try_lock() {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for model in model_list.iter() {
-                                ui.collapsing(&model.label, |ui| {
-                                    for (variant, file) in &model.variants {
-                                        if ui.button(variant).clicked() {
-                                            let scene_clone = self.scene.clone();
-                                            let device = device.clone();
-                                            let url = Url::parse(ASSETS_BASE_URL)
-                                                .unwrap()
-                                                .join(&format!(
-                                                    "{}/{}/{}",
-                                                    &model.name, variant, file
-                                                ))
-                                                .unwrap();
-                                            crate::spawn(async move {
-                                                let scene = gltf_loader::load_asset(
-                                                    url,
-                                                    &device,
-                                                    color_format,
-                                                )
-                                                .await
-                                                .unwrap();
-                                                scene_clone.lock().await.replace(scene);
-                                            });
-                                        }
-                                    }
-                                });
-                            }
-                        });
-                    } else {
-                        ui.label("loading");
-                    }
+                    self.show_scene_menu(device, color_format, ui);
                 });
+
                 ui.menu_button("Camera", |ui| self.user_camera.run_ui(ui));
             });
         });
+    }
+
+    fn show_scene_menu(
+        &mut self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        ui: &mut egui::Ui,
+    ) {
+        if let Ok(model_list) = self.asset_list.try_lock() {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for model in model_list.iter() {
+                    ui.collapsing(&model.label, |ui| {
+                        for (variant, file) in &model.variants {
+                            if ui.button(variant).clicked() {
+                                let scene_clone = self.scene.clone();
+                                let device = device.clone();
+                                let url = Url::parse(ASSETS_BASE_URL)
+                                    .unwrap()
+                                    .join(&format!("{}/{}/{}", &model.name, variant, file))
+                                    .unwrap();
+                                crate::spawn(async move {
+                                    let scene = gltf_loader::load_asset(url, &device, color_format)
+                                        .await
+                                        .unwrap();
+                                    scene_clone.lock().unwrap().replace(scene);
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        } else {
+            ui.label("loading");
+        }
     }
 }
