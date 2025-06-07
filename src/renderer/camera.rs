@@ -1,6 +1,6 @@
 use std::f32::consts::TAU;
 
-use egui::{DragValue, Widget};
+use eframe::egui::{self, DragValue, Widget};
 use glam::{EulerRot, Mat4, Vec2, Vec3};
 use puffin::profile_function;
 

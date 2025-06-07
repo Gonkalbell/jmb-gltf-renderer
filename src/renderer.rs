@@ -6,8 +6,8 @@ mod shaders;
 
 use std::sync::{Arc, Mutex};
 
+use eframe::egui::{self, ahash::HashMap};
 use eframe::wgpu;
-use egui::{ahash::HashMap};
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
