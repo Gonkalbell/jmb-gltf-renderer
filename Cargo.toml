@@ -10,22 +10,22 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 [dependencies]
-bytemuck = { version = "1.16.3", features = ["derive"] }
-eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "wgpu", "persistence", "wayland", "x11"] }
+bytemuck = { version = "1.23", features = ["derive"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "persistence", "wayland", "x11"] }
 glam = { version = "0.30", features = ["bytemuck", "serde"] }
-gltf = { version = "1.4.1", features = ["KHR_lights_punctual", "extensions", "extras"] }
+gltf = { version = "1.4", features = ["KHR_lights_punctual", "extensions", "extras"] }
 ktx2 = "0.4"
 log = "0.4"
 puffin = { version = "0.19.1", features = ["web"] }
-puffin_http = "0.16.1"
-reqwest = { version = "0.12.19", features = ["json"] }
+puffin_http = "0.16"
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "24"
 
 [build-dependencies]
-miette = { version = "7.2.0", features = ["fancy"] }
-wgsl_bindgen = "0.18.2"
+miette = { version = "7.2", features = ["fancy"] }
+wgsl_bindgen = "0.18"
 
 
 # native:
@@ -36,8 +36,8 @@ tokio = { version = "1.43.0", features = ["macros", "rt", "rt-multi-thread", "sy
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen-futures = "0.4"
-web-sys = "0.3.70"           # to access the DOM (to hide the loading text)
-tokio = { version = "1.43.0", features = ["macros", "sync"] }
+web-sys = "0.3"           # to access the DOM (to hide the loading text)
+tokio = { version = "1.43", features = ["macros", "sync"] }
 
 [profile.release]
 opt-level = 2 # fast and small wasm
