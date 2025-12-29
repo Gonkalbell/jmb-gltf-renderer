@@ -115,7 +115,7 @@ impl SceneRenderer {
         });
 
         let camera_bgroup = CameraBindGroup::from_bindings(
-            &device,
+            device,
             CameraBindGroupEntries::new(CameraBindGroupEntriesParams {
                 res_camera: camera_buf.as_entire_buffer_binding(),
             }),
@@ -172,10 +172,10 @@ impl SceneRenderer {
             }),
         );
 
-        let shader = skybox::create_shader_module_embed_source(&device);
+        let shader = skybox::create_shader_module_embed_source(device);
         let skybox_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("skybox"),
-            layout: Some(&skybox::create_pipeline_layout(&device)),
+            layout: Some(&skybox::create_pipeline_layout(device)),
             vertex: skybox::vertex_state(&shader, &skybox::vs_skybox_entry()),
             fragment: Some(skybox::fragment_state(
                 &shader,
@@ -317,7 +317,7 @@ impl SceneRenderer {
         }
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Scene", |ui| {
                     self.show_scene_menu(device, color_format, ui);
                 });

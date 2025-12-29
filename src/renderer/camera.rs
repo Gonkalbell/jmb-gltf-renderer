@@ -35,7 +35,7 @@ impl ArcBallCamera {
     pub fn update(&mut self, input: &egui::InputState) {
         profile_function!();
 
-        let screen_size: Vec2 = <[f32; 2]>::from(input.screen_rect().size()).into();
+        let screen_size: Vec2 = <[f32; 2]>::from(input.content_rect().size()).into();
         self.aspect_ratio = screen_size.x / screen_size.y;
 
         // Note: I'm using `delta` rather than `motion`. Even though `motion` is unfiltered and usually better suited for
