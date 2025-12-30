@@ -336,7 +336,7 @@ impl SceneRenderer {
         if let Ok(model_list) = self.asset_list.try_lock() {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for model in model_list.iter() {
-                    ui.collapsing(&model.label, |ui| {
+                    ui.menu_button(&model.label, |ui| {
                         for (variant, file) in &model.variants {
                             if ui.button(variant).clicked() {
                                 let scene_clone = self.scene.clone();

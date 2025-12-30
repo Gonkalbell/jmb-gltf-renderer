@@ -5,6 +5,7 @@ use super::{
 use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use reqwest::Url;
+use std::str::FromStr;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use wgpu::BufferUsages;
@@ -13,21 +14,41 @@ pub async fn load_asset(
     url: Url,
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
-) -> reqwest::Result<Scene> {
-    // TODO: I'm currently embedding the glb file directly into my binary because I'm too lazy to handle file
-    // loading separately on native and wasm targets. Maybe I should use WASI or some other API like that.
-    // Also, I should load these asynchronously
-    log::info!("requesting {}", &url);
-    let gltf_file = reqwest::get(url.clone()).await?.bytes().await?;
-    log::info!("processing {}", &url);
+) -> anyhow::Result<Scene> {
+    let gltf_file = import_data(&url).await?;
+    let gltf_file = gltf::Gltf::from_slice(&gltf_file)?;
 
-    let (doc, buffer_data, _image_data) =
-        gltf::import_slice(gltf_file).expect("Failed to load GLTF file");
+    let doc = gltf_file.document;
+    let mut blob = gltf_file.blob.unwrap_or_default();
+    blob.resize(4 * blob.len().div_ceil(4), 0);
+    let buffer_data = futures::future::try_join_all(doc.buffers().map(|buffer| {
+        let blob = blob.clone();
+        let base = url.clone();
+        async move {
+            let source = buffer.source();
+            let data = match source {
+                gltf::buffer::Source::Bin => {
+                    // TODO: make this a COW to avoid cloning?
+                    blob
+                }
+                gltf::buffer::Source::Uri(uri) => {
+                    let url = Url::from_str(uri)
+                        .or_else(|_| base.join(uri))
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to parse buffer URI '{}': {}", uri, e)
+                        })?;
+                    import_data(&url).await?
+                }
+            };
+            Ok::<_, anyhow::Error>(gltf::buffer::Data(data))
+        }
+    }))
+    .await?;
 
     let buffers: Vec<_> = doc
         .views()
         .map(|view: gltf::buffer::View| {
-            let data = &buffer_data[view.buffer().index()].0;
+            let data = &buffer_data[view.buffer().index()];
             let contents = &data[view.offset()..view.offset() + view.length()];
             let usage = BufferUsages::COPY_DST | BufferUsages::VERTEX | BufferUsages::INDEX;
             Arc::new(
@@ -50,6 +71,13 @@ pub async fn load_asset(
     log::info!("finished loading {}", &url);
 
     Ok(Scene { nodes, meshes })
+}
+
+async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
+    log::info!("requesting {}", &url);
+    let data = reqwest::get(url.clone()).await?.bytes().await?.to_vec();
+    log::info!("received {}", &url);
+    Ok(data)
 }
 
 fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
