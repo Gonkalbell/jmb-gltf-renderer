@@ -1,12 +1,11 @@
 use super::{
-    scene, AttribBuffer, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
-    NodeBindGroupEntriesParams, Primitive, PrimitiveIndexData, Scene, DEPTH_FORMAT,
+    scene, Asset, AttribBuffer, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
+    NodeBindGroupEntriesParams, Primitive, PrimitiveIndexData, DEPTH_FORMAT,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use reqwest::Url;
 use std::str::FromStr;
-use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use wgpu::BufferUsages;
 
@@ -14,7 +13,7 @@ pub async fn load_asset(
     url: Url,
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
-) -> anyhow::Result<Scene> {
+) -> anyhow::Result<Asset> {
     let gltf_file = import_data(&url).await?;
     let gltf_file = gltf::Gltf::from_slice(&gltf_file)?;
 
@@ -51,13 +50,11 @@ pub async fn load_asset(
             let data = &buffer_data[view.buffer().index()];
             let contents = &data[view.offset()..view.offset() + view.length()];
             let usage = BufferUsages::COPY_DST | BufferUsages::VERTEX | BufferUsages::INDEX;
-            Arc::new(
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: view.name(),
-                    contents,
-                    usage,
-                }),
-            )
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: view.name(),
+                contents,
+                usage,
+            })
         })
         .collect();
 
@@ -70,7 +67,7 @@ pub async fn load_asset(
     let meshes = generate_meshes(device, doc, buffers, color_format);
     log::info!("finished loading {}", &url);
 
-    Ok(Scene { nodes, meshes })
+    Ok(Asset { nodes, meshes })
 }
 
 async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
@@ -157,7 +154,7 @@ fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
 fn generate_meshes(
     device: &wgpu::Device,
     doc: gltf::Document,
-    buffers: Vec<Arc<wgpu::Buffer>>,
+    buffers: Vec<wgpu::Buffer>,
     color_format: wgpu::TextureFormat,
 ) -> Vec<Mesh> {
     let shader = scene::create_shader_module_embed_source(device);

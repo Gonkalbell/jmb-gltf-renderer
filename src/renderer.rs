@@ -42,12 +42,12 @@ pub struct SceneRenderer {
     skybox_bgroup: SkyboxBindGroup,
     skybox_pipeline: wgpu::RenderPipeline,
 
-    scene: Arc<Mutex<Option<Scene>>>,
+    asset: Arc<Mutex<Option<Asset>>>,
 
     asset_list: Arc<Mutex<Vec<ModelLinkInfo>>>,
 }
 
-struct Scene {
+struct Asset {
     nodes: Vec<Node>,
     meshes: Vec<Mesh>,
 }
@@ -72,13 +72,13 @@ struct Primitive {
 
 #[derive(Debug)]
 struct AttribBuffer {
-    buffer: Arc<wgpu::Buffer>,
+    buffer: wgpu::Buffer,
     offset: wgpu::BufferAddress,
 }
 
 #[derive(Debug)]
 struct PrimitiveIndexData {
-    buffer: Arc<wgpu::Buffer>,
+    buffer: wgpu::Buffer,
     format: wgpu::IndexFormat,
     offset: u64,
 }
@@ -199,8 +199,8 @@ impl SceneRenderer {
 
         // Load the GLTF scene
 
-        let scene = Arc::new(Mutex::new(None));
-        let scene_clone = scene.clone();
+        let asset = Arc::new(Mutex::new(None));
+        let asset_clone = asset.clone();
         let device = device.clone();
         crate::spawn(async move {
             let url = Url::parse(ASSETS_BASE_URL)
@@ -210,7 +210,7 @@ impl SceneRenderer {
             let loaded_scene = gltf_loader::load_asset(url, &device, color_format)
                 .await
                 .unwrap();
-            scene_clone.lock().unwrap().replace(loaded_scene);
+            asset_clone.lock().unwrap().replace(loaded_scene);
         });
 
         // Load the asset list
@@ -238,7 +238,7 @@ impl SceneRenderer {
             skybox_bgroup,
             skybox_pipeline,
 
-            scene,
+            asset,
 
             asset_list,
         }
@@ -271,7 +271,7 @@ impl SceneRenderer {
 
         self.camera_bgroup.set(rpass);
 
-        let scene_lock = self.scene.try_lock();
+        let scene_lock = self.asset.try_lock();
         if let Ok(Some(scene)) = scene_lock.as_ref().map(|x| x.as_ref()) {
             for node in &scene.nodes {
                 node.bgroup.set(rpass);
@@ -339,7 +339,7 @@ impl SceneRenderer {
                     ui.menu_button(&model.label, |ui| {
                         for (variant, file) in &model.variants {
                             if ui.button(variant).clicked() {
-                                let scene_clone = self.scene.clone();
+                                let asset_clone = self.asset.clone();
                                 let device = device.clone();
                                 let url = Url::parse(ASSETS_BASE_URL)
                                     .unwrap()
@@ -349,7 +349,7 @@ impl SceneRenderer {
                                     let scene = gltf_loader::load_asset(url, &device, color_format)
                                         .await
                                         .unwrap();
-                                    scene_clone.lock().unwrap().replace(scene);
+                                    asset_clone.lock().unwrap().replace(scene);
                                 });
                             }
                         }
