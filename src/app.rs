@@ -55,7 +55,7 @@ impl eframe::App for RendererApp {
             .callback_resources
             .get_mut::<SceneRenderer>()
         {
-            renderer.run_ui(ctx, &render_state.device, render_state.target_format);
+            renderer.run_ui(ctx, &render_state);
         }
 
         // Run our custom rendering as a callback. Normally eframe is set up to allow you to handle custom rendering in

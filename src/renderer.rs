@@ -5,7 +5,7 @@ mod gltf_loader;
 mod shaders;
 
 use eframe::egui::{self, ahash::HashMap};
-use eframe::wgpu;
+use eframe::{egui_wgpu, wgpu};
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
@@ -302,12 +302,7 @@ impl SceneRenderer {
         rpass.draw(0..3, 0..1);
     }
 
-    pub fn run_ui(
-        &mut self,
-        ctx: &egui::Context,
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-    ) {
+    pub fn run_ui(&mut self, ctx: &egui::Context, render_state: &egui_wgpu::RenderState) {
         profile_function!();
 
         if !ctx.wants_keyboard_input() && !ctx.wants_pointer_input() {
@@ -318,11 +313,28 @@ impl SceneRenderer {
 
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("Scene", |ui| {
-                    self.show_scene_menu(device, color_format, ui);
+                ui.menu_button("Asset", |ui| {
+                    self.show_scene_menu(&render_state.device, render_state.target_format, ui);
                 });
 
                 ui.menu_button("Camera", |ui| self.user_camera.run_ui(ui));
+
+                ui.menu_button("Info", |ui| {
+                    ui.menu_button("Adapter", |ui| {
+                        let info = render_state.adapter.get_info();
+                        ui.label(format!("name: {}", info.name));
+                        ui.label(format!("backend: {}", info.backend));
+                        ui.label(format!("driver: {}", info.driver));
+                        ui.label(format!("driver info: {}", info.driver_info));
+                        ui.label(format!("type: {:?}", info.device_type));
+                    });
+                    if let Some(asset) = self.asset_rx.borrow().as_ref() {
+                        ui.menu_button("Asset", |ui| {
+                            ui.label(format!("nodes: {}", asset.nodes.len()));
+                            ui.label(format!("meshes: {}", asset.meshes.len()));
+                        });
+                    }
+                });
             });
         });
     }
