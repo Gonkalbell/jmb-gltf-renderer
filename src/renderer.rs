@@ -4,13 +4,12 @@ mod gltf_loader;
 #[allow(clippy::all)]
 mod shaders;
 
-use std::sync::{Arc, Mutex};
-
 use eframe::egui::{self, ahash::HashMap};
 use eframe::wgpu;
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
+use tokio::sync::watch::{Receiver, Sender};
 use wgpu::util::DeviceExt;
 
 use camera::ArcBallCamera;
@@ -42,9 +41,10 @@ pub struct SceneRenderer {
     skybox_bgroup: SkyboxBindGroup,
     skybox_pipeline: wgpu::RenderPipeline,
 
-    asset: Arc<Mutex<Option<Asset>>>,
+    asset_rx: Receiver<Option<Asset>>,
+    asset_tx: Sender<Option<Asset>>,
 
-    asset_list: Arc<Mutex<Vec<ModelLinkInfo>>>,
+    asset_list: Receiver<Vec<ModelLinkInfo>>,
 }
 
 struct Asset {
@@ -199,8 +199,8 @@ impl SceneRenderer {
 
         // Load the GLTF scene
 
-        let asset = Arc::new(Mutex::new(None));
-        let asset_clone = asset.clone();
+        let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
+        let asset_tx_clone = asset_tx.clone();
         let device = device.clone();
         crate::spawn(async move {
             let url = Url::parse(ASSETS_BASE_URL)
@@ -210,13 +210,12 @@ impl SceneRenderer {
             let loaded_scene = gltf_loader::load_asset(url, &device, color_format)
                 .await
                 .unwrap();
-            asset_clone.lock().unwrap().replace(loaded_scene);
+            let _ = asset_tx_clone.send(Some(loaded_scene));
         });
 
         // Load the asset list
 
-        let asset_list = Arc::new(Mutex::new(Vec::new()));
-        let asset_list_clone = asset_list.clone();
+        let (asset_list_tx, asset_list_rx) = tokio::sync::watch::channel(Vec::new());
         crate::spawn(async move {
             let url = Url::parse(ASSETS_BASE_URL)
                 .unwrap()
@@ -227,7 +226,7 @@ impl SceneRenderer {
                 .into_iter()
                 .filter(|m| m.tags.iter().any(|t| *t == "core"))
                 .collect();
-            *asset_list_clone.lock().unwrap() = req;
+            let _ = asset_list_tx.send(req);
         });
 
         Self {
@@ -238,9 +237,10 @@ impl SceneRenderer {
             skybox_bgroup,
             skybox_pipeline,
 
-            asset,
+            asset_rx,
+            asset_tx,
 
-            asset_list,
+            asset_list: asset_list_rx,
         }
     }
 
@@ -271,11 +271,11 @@ impl SceneRenderer {
 
         self.camera_bgroup.set(rpass);
 
-        let scene_lock = self.asset.try_lock();
-        if let Ok(Some(scene)) = scene_lock.as_ref().map(|x| x.as_ref()) {
-            for node in &scene.nodes {
+        let scene = self.asset_rx.borrow();
+        if let Some(asset) = scene.as_ref() {
+            for node in &asset.nodes {
                 node.bgroup.set(rpass);
-                let mesh = scene
+                let mesh = asset
                     .meshes
                     .get(node.mesh_index)
                     .expect("Node didn't have a mesh");
@@ -333,13 +333,14 @@ impl SceneRenderer {
         color_format: wgpu::TextureFormat,
         ui: &mut egui::Ui,
     ) {
-        if let Ok(model_list) = self.asset_list.try_lock() {
+        let model_list = self.asset_list.borrow();
+        if !model_list.is_empty() {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for model in model_list.iter() {
                     ui.menu_button(&model.label, |ui| {
                         for (variant, file) in &model.variants {
                             if ui.button(variant).clicked() {
-                                let asset_clone = self.asset.clone();
+                                let asset_tx = self.asset_tx.clone();
                                 let device = device.clone();
                                 let url = Url::parse(ASSETS_BASE_URL)
                                     .unwrap()
@@ -349,15 +350,13 @@ impl SceneRenderer {
                                     let scene = gltf_loader::load_asset(url, &device, color_format)
                                         .await
                                         .unwrap();
-                                    asset_clone.lock().unwrap().replace(scene);
+                                    let _ = asset_tx.send(Some(scene));
                                 });
                             }
                         }
                     });
                 }
             });
-        } else {
-            ui.label("loading");
         }
     }
 }
