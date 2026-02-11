@@ -1,8 +1,10 @@
 mod camera;
-mod gltf_loader;
+// mod gltf_loader;
 
 #[allow(clippy::all)]
 mod shaders;
+
+use std::borrow::Cow;
 
 use eframe::egui::{self, ahash::HashMap};
 use eframe::{egui_wgpu, wgpu};
@@ -25,10 +27,6 @@ type CameraBindGroup = bgroup_camera::WgpuBindGroup0;
 type CameraBindGroupEntries<'a> = bgroup_camera::WgpuBindGroup0Entries<'a>;
 type CameraBindGroupEntriesParams<'a> = bgroup_camera::WgpuBindGroup0EntriesParams<'a>;
 
-type NodeBindGroup = scene::WgpuBindGroup1;
-type NodeBindGroupEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
-type NodeBindGroupEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
-
 type SkyboxBindGroup = skybox::WgpuBindGroup1;
 type SkyboxBindGroupEntries<'a> = skybox::WgpuBindGroup1Entries<'a>;
 type SkyboxBindGroupEntriesParams<'a> = skybox::WgpuBindGroup1EntriesParams<'a>;
@@ -41,6 +39,9 @@ pub struct SceneRenderer {
     skybox_bgroup: SkyboxBindGroup,
     skybox_pipeline: wgpu::RenderPipeline,
 
+    raytrace_pipeline: wgpu::RenderPipeline,
+    raytrace_default_bgroup: wgpu::BindGroup,
+
     asset_rx: Receiver<Option<Asset>>,
     asset_tx: Sender<Option<Asset>>,
 
@@ -48,39 +49,7 @@ pub struct SceneRenderer {
 }
 
 struct Asset {
-    nodes: Vec<Node>,
-    meshes: Vec<Mesh>,
-}
-
-struct Node {
-    mesh_index: usize,
-    bgroup: NodeBindGroup,
-}
-
-#[derive(Debug)]
-struct Mesh {
-    primitives: Vec<Primitive>,
-}
-
-#[derive(Debug)]
-struct Primitive {
-    pipeline: wgpu::RenderPipeline,
-    attrib_buffers: Vec<AttribBuffer>,
-    draw_count: u32,
-    index_data: Option<PrimitiveIndexData>,
-}
-
-#[derive(Debug)]
-struct AttribBuffer {
-    buffer: wgpu::Buffer,
-    offset: wgpu::BufferAddress,
-}
-
-#[derive(Debug)]
-struct PrimitiveIndexData {
-    buffer: wgpu::Buffer,
-    format: wgpu::IndexFormat,
-    offset: u64,
+    scene: wgpu::Tlas,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +142,13 @@ impl SceneRenderer {
         );
 
         let shader = skybox::create_shader_module_embed_source(device);
+        let depth_stencil = Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
         let skybox_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("skybox"),
             layout: Some(&skybox::create_pipeline_layout(device)),
@@ -185,13 +161,7 @@ impl SceneRenderer {
                 front_face: wgpu::FrontFace::Cw,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: depth_stencil.clone(),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -202,16 +172,16 @@ impl SceneRenderer {
         let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
         let asset_tx_clone = asset_tx.clone();
         let device = device.clone();
-        crate::spawn(async move {
-            let url = Url::parse(ASSETS_BASE_URL)
-                .unwrap()
-                .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
-                .unwrap();
-            let loaded_scene = gltf_loader::load_asset(url, &device, color_format)
-                .await
-                .unwrap();
-            let _ = asset_tx_clone.send(Some(loaded_scene));
-        });
+        // crate::spawn(async move {
+        //     let url = Url::parse(ASSETS_BASE_URL)
+        //         .unwrap()
+        //         .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
+        //         .unwrap();
+        //     let loaded_scene = gltf_loader::load_asset(url, &device, color_format)
+        //         .await
+        //         .unwrap();
+        //     let _ = asset_tx_clone.send(Some(loaded_scene));
+        // });
 
         // Load the asset list
 
@@ -229,6 +199,79 @@ impl SceneRenderer {
             let _ = asset_list_tx.send(req);
         });
 
+        // Create Ray Tracing resources
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Raytrace Shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!(
+                "renderer/shaders/ray_trace.wgsl"
+            ))),
+        });
+
+        let tlas_bgroup_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("BindGroup Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::AccelerationStructure {
+                        vertex_return: false,
+                    },
+                    count: None,
+                }],
+            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Raytrace Layout"),
+            bind_group_layouts: &[
+                &bgroup_camera::WgpuBindGroup0::get_bind_group_layout(&device),
+                &tlas_bgroup_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+        let raytrace_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Raytrace Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(color_format.into())],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let tlas = device.create_tlas(&wgpu::wgt::CreateTlasDescriptor {
+            label: Some("Default Scene TLAS"),
+            max_instances: 0,
+            flags: wgpu::AccelerationStructureFlags::empty(),
+            update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+        });
+        let raytrace_default_bgroup = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Scene TLAS Default BindGroup"),
+            layout: &tlas_bgroup_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::AccelerationStructure(&tlas),
+            }],
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {label: Some("Build default TLAS")});
+        encoder.build_acceleration_structures([], &[tlas]);
+        queue.submit([encoder.finish()]);
+
         Self {
             user_camera,
             camera_buf,
@@ -241,6 +284,9 @@ impl SceneRenderer {
             asset_tx,
 
             asset_list: asset_list_rx,
+
+            raytrace_pipeline,
+            raytrace_default_bgroup,
         }
     }
 
@@ -271,35 +317,13 @@ impl SceneRenderer {
 
         self.camera_bgroup.set(rpass);
 
-        let scene = self.asset_rx.borrow();
-        if let Some(asset) = scene.as_ref() {
-            for node in &asset.nodes {
-                node.bgroup.set(rpass);
-                let mesh = asset
-                    .meshes
-                    .get(node.mesh_index)
-                    .expect("Node didn't have a mesh");
-                for primitive in &mesh.primitives {
-                    rpass.set_pipeline(&primitive.pipeline);
-                    for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
-                        rpass.set_vertex_buffer(i as _, attrib.buffer.slice(attrib.offset..));
-                    }
-                    if let Some(index_data) = &primitive.index_data {
-                        rpass.set_index_buffer(
-                            index_data.buffer.slice(index_data.offset..),
-                            index_data.format,
-                        );
-                        rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);
-                    } else {
-                        rpass.draw(0..primitive.draw_count, 0..1);
-                    }
-                }
-            }
-        }
-
-        self.skybox_bgroup.set(rpass);
-        rpass.set_pipeline(&self.skybox_pipeline);
+        rpass.set_bind_group(1, Some(&self.raytrace_default_bgroup), &[]);
+        rpass.set_pipeline(&self.raytrace_pipeline);
         rpass.draw(0..3, 0..1);
+
+        // self.skybox_bgroup.set(rpass);
+        // rpass.set_pipeline(&self.skybox_pipeline);
+        // rpass.draw(0..3, 0..1);
     }
 
     pub fn run_ui(&mut self, ctx: &egui::Context, render_state: &egui_wgpu::RenderState) {
@@ -328,12 +352,6 @@ impl SceneRenderer {
                         ui.label(format!("driver info: {}", info.driver_info));
                         ui.label(format!("type: {:?}", info.device_type));
                     });
-                    if let Some(asset) = self.asset_rx.borrow().as_ref() {
-                        ui.menu_button("Asset", |ui| {
-                            ui.label(format!("nodes: {}", asset.nodes.len()));
-                            ui.label(format!("meshes: {}", asset.meshes.len()));
-                        });
-                    }
                 });
             });
         });
@@ -358,12 +376,12 @@ impl SceneRenderer {
                                     .unwrap()
                                     .join(&format!("{}/{}/{}", &model.name, variant, file))
                                     .unwrap();
-                                crate::spawn(async move {
-                                    let scene = gltf_loader::load_asset(url, &device, color_format)
-                                        .await
-                                        .unwrap();
-                                    let _ = asset_tx.send(Some(scene));
-                                });
+                                // crate::spawn(async move {
+                                //     let scene = gltf_loader::load_asset(url, &device, color_format)
+                                //         .await
+                                //         .unwrap();
+                                //     let _ = asset_tx.send(Some(scene));
+                                // });
                             }
                         }
                     });
