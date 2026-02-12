@@ -2,7 +2,7 @@
 name = "jmb-gltf-renderer"
 version = "0.1.0"
 authors = ["John Michael Bell <johnmichaelbell@gmail.com>"]
-edition = "2021"
+edition = "2024"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
 
 [package.metadata.docs.rs]
@@ -14,13 +14,13 @@ anyhow = "1.0"
 bytemuck = { version = "1.23", features = ["derive"] }
 eframe = { version = "0.33", default-features = false, features = ["default_fonts", "wgpu", "persistence", "wayland", "x11"] }
 futures = "0.3"
-glam = { version = "0.30", features = ["bytemuck", "serde"] }
+glam = { version = "0.32", features = ["bytemuck", "serde"] }
 gltf = { version = "1.4", features = ["KHR_lights_punctual", "extensions", "extras"] }
 ktx2 = "0.4"
 log = "0.4"
 puffin = { version = "0.19.1", features = ["web"] }
 puffin_http = "0.16"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wgpu = "27"
@@ -33,7 +33,7 @@ wgsl_bindgen = "0.21"
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
-tokio = { version = "1.43.0", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { version = "1.49", features = ["macros", "rt", "rt-multi-thread", "sync"] }
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

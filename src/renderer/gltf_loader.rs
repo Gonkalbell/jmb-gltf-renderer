@@ -1,13 +1,13 @@
 use super::{
-    scene, Asset, AttribBuffer, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
-    NodeBindGroupEntriesParams, Primitive, PrimitiveIndexData, DEPTH_FORMAT,
+    Asset, AttribBuffer, DEPTH_FORMAT, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
+    NodeBindGroupEntriesParams, Primitive, PrimitiveIndexData, scene,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use reqwest::Url;
 use std::str::FromStr;
-use wgpu::util::DeviceExt;
 use wgpu::BufferUsages;
+use wgpu::util::DeviceExt;
 
 pub async fn load_asset(
     url: Url,
@@ -120,8 +120,7 @@ fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
         *transform = inv_bounding_box_matrix * *transform;
     }
 
-    let nodes = doc
-        .nodes()
+    doc.nodes()
         .zip(world_transforms.iter())
         .filter_map(|(node, &transform)| {
             node.mesh().map(|mesh| {
@@ -147,8 +146,7 @@ fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
                 }
             })
         })
-        .collect();
-    nodes
+        .collect()
 }
 
 fn generate_meshes(
