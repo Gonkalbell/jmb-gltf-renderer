@@ -5,9 +5,22 @@ use super::{
 use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use reqwest::Url;
+use std::collections::HashMap;
 use std::str::FromStr;
 use wgpu::BufferUsages;
 use wgpu::util::DeviceExt;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct AttributeInfo {
+    array_stride: u64,
+    attribute: wgpu::VertexAttribute,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PipelineCacheKey {
+    attributes: Vec<AttributeInfo>,
+    primitive_state: wgpu::PrimitiveState,
+}
 
 pub async fn load_asset(
     url: Url,
@@ -64,7 +77,16 @@ pub async fn load_asset(
 
     // Build Meshes
 
-    let meshes = generate_meshes(device, doc, buffers, color_format);
+    let shader = scene::create_shader_module_embed_source(device);
+    let mut pipeline_cache = HashMap::new();
+
+    let mut pipeline_cache_fn = |key: PipelineCacheKey| {
+        pipeline_cache.entry(key).or_insert_with_key(|key| {
+            create_pipeline(device, color_format, &shader, None, key)
+        }).clone()
+    };
+
+    let meshes = generate_meshes(device, doc, buffers, &mut pipeline_cache_fn);
     log::info!("finished loading {}", &url);
 
     Ok(Asset { nodes, meshes })
@@ -153,10 +175,8 @@ fn generate_meshes(
     device: &wgpu::Device,
     doc: gltf::Document,
     buffers: Vec<wgpu::Buffer>,
-    color_format: wgpu::TextureFormat,
+    pipeline_cache_fn: &mut impl FnMut(PipelineCacheKey) -> wgpu::RenderPipeline,
 ) -> Vec<Mesh> {
-    let shader = scene::create_shader_module_embed_source(device);
-
     doc.meshes()
         .map(|doc_mesh| {
             let primitives = doc_mesh
@@ -192,14 +212,14 @@ fn generate_meshes(
                                 (0, accessor.offset())
                             };
                             Some((
-                                (
-                                    stride,
-                                    wgpu::VertexAttribute {
+                                AttributeInfo {
+                                    array_stride: stride,
+                                    attribute: wgpu::VertexAttribute {
                                         format,
                                         offset: attrib_offset as _,
                                         shader_location,
                                     },
-                                ),
+                                },
                                 AttribBuffer {
                                     buffer: buffers[buffer_view.index()].clone(),
                                     offset: buf_offset as _,
@@ -208,52 +228,24 @@ fn generate_meshes(
                         })
                         .unzip();
 
-                    let attrib_buffer_layouts: Vec<_> = attrib_layouts
-                        .iter()
-                        .map(|(array_stride, attributes)| wgpu::VertexBufferLayout {
-                            array_stride: *array_stride,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: std::slice::from_ref(attributes),
-                        })
-                        .collect();
-
-                    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: doc_mesh.name(),
-                        layout: Some(&scene::create_pipeline_layout(device)),
-                        vertex: wgpu::VertexState {
-                            module: &shader,
-                            entry_point: Some(scene::ENTRY_VS_SCENE),
-                            compilation_options: Default::default(),
-                            buffers: &attrib_buffer_layouts,
+                    let primitive_state = wgpu::PrimitiveState {
+                        topology: match doc_primitive.mode() {
+                            Mode::Points => wgpu::PrimitiveTopology::PointList,
+                            Mode::Lines => wgpu::PrimitiveTopology::LineList,
+                            Mode::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+                            Mode::Triangles => wgpu::PrimitiveTopology::TriangleList,
+                            Mode::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+                            mode => unimplemented!("format {:?} not supported", mode),
                         },
-                        fragment: Some(scene::fragment_state(
-                            &shader,
-                            &scene::fs_scene_entry([Some(color_format.into())]),
-                        )),
-                        primitive: wgpu::PrimitiveState {
-                            topology: match doc_primitive.mode() {
-                                Mode::Points => wgpu::PrimitiveTopology::PointList,
-                                Mode::Lines => wgpu::PrimitiveTopology::LineList,
-                                Mode::LineStrip => wgpu::PrimitiveTopology::LineStrip,
-                                Mode::Triangles => wgpu::PrimitiveTopology::TriangleList,
-                                Mode::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
-                                mode => unimplemented!("format {:?} not supported", mode),
-                            },
-                            cull_mode: Some(wgpu::Face::Back),
-                            front_face: wgpu::FrontFace::Ccw,
-                            ..Default::default()
-                        },
-                        depth_stencil: Some(wgpu::DepthStencilState {
-                            format: DEPTH_FORMAT,
-                            depth_write_enabled: true,
-                            depth_compare: wgpu::CompareFunction::Less,
-                            stencil: wgpu::StencilState::default(),
-                            bias: wgpu::DepthBiasState::default(),
-                        }),
-                        multisample: wgpu::MultisampleState::default(),
-                        multiview: None,
-                        cache: None,
-                    });
+                        cull_mode: Some(wgpu::Face::Back),
+                        front_face: wgpu::FrontFace::Ccw,
+                        ..Default::default()
+                    };
+                    let key = PipelineCacheKey {
+                        attributes: attrib_layouts,
+                        primitive_state,
+                    };
+                    let pipeline = pipeline_cache_fn(key);
 
                     let mut draw_count = vertex_count as u32;
                     let index_data = doc_primitive.indices().map(|indices| {
@@ -281,6 +273,43 @@ fn generate_meshes(
             Mesh { primitives }
         })
         .collect()
+}
+
+fn create_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat, shader: &wgpu::ShaderModule, label: Option<&str>, key: &PipelineCacheKey) -> wgpu::RenderPipeline {
+    let attrib_buffer_layouts: Vec<_> = key.attributes
+        .iter()
+        .map(|AttributeInfo{array_stride, attribute}| wgpu::VertexBufferLayout {
+            array_stride: *array_stride,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: std::slice::from_ref(attribute),
+        })
+        .collect();
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label,
+        layout: Some(&scene::create_pipeline_layout(device)),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(scene::ENTRY_VS_SCENE),
+            compilation_options: Default::default(),
+            buffers: &attrib_buffer_layouts,
+        },
+        fragment: Some(scene::fragment_state(
+            shader,
+            &scene::fs_scene_entry([Some(color_format.into())]),
+        )),
+        primitive: key.primitive_state,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
 }
 
 fn get_vertex_format(accessor: &gltf::Accessor) -> wgpu::VertexFormat {
