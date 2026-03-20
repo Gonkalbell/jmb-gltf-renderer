@@ -81,9 +81,10 @@ pub async fn load_asset(
     let mut pipeline_cache = HashMap::new();
 
     let mut pipeline_cache_fn = |key: PipelineCacheKey| {
-        pipeline_cache.entry(key).or_insert_with_key(|key| {
-            create_pipeline(device, color_format, &shader, None, key)
-        }).clone()
+        pipeline_cache
+            .entry(key)
+            .or_insert_with_key(|key| create_pipeline(device, color_format, &shader, None, key))
+            .clone()
     };
 
     let meshes = generate_meshes(device, doc, buffers, &mut pipeline_cache_fn);
@@ -275,14 +276,26 @@ fn generate_meshes(
         .collect()
 }
 
-fn create_pipeline(device: &wgpu::Device, color_format: wgpu::TextureFormat, shader: &wgpu::ShaderModule, label: Option<&str>, key: &PipelineCacheKey) -> wgpu::RenderPipeline {
-    let attrib_buffer_layouts: Vec<_> = key.attributes
+fn create_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    shader: &wgpu::ShaderModule,
+    label: Option<&str>,
+    key: &PipelineCacheKey,
+) -> wgpu::RenderPipeline {
+    let attrib_buffer_layouts: Vec<_> = key
+        .attributes
         .iter()
-        .map(|AttributeInfo{array_stride, attribute}| wgpu::VertexBufferLayout {
-            array_stride: *array_stride,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: std::slice::from_ref(attribute),
-        })
+        .map(
+            |AttributeInfo {
+                 array_stride,
+                 attribute,
+             }| wgpu::VertexBufferLayout {
+                array_stride: *array_stride,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: std::slice::from_ref(attribute),
+            },
+        )
         .collect();
 
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
