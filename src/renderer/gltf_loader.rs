@@ -9,7 +9,6 @@ use gltf::mesh::Mode;
 use reqwest::Url;
 use std::collections::HashMap;
 use std::str::FromStr;
-use wgpu::BufferUsages;
 use wgpu::util::DeviceExt;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -64,7 +63,12 @@ pub async fn load_asset(
         .map(|view: gltf::buffer::View| {
             let data = &buffer_data[view.buffer().index()];
             let contents = &data[view.offset()..view.offset() + view.length()];
-            let usage = BufferUsages::COPY_DST | BufferUsages::VERTEX | BufferUsages::INDEX;
+            let target_flags = match view.target() {
+                Some(gltf::buffer::Target::ArrayBuffer) => wgpu::BufferUsages::VERTEX,
+                Some(gltf::buffer::Target::ElementArrayBuffer) => wgpu::BufferUsages::INDEX,
+                None => wgpu::BufferUsages::empty(),
+            };
+            let usage = wgpu::BufferUsages::COPY_DST | target_flags;
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: view.name(),
                 contents,

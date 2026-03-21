@@ -94,32 +94,6 @@ impl OwnedBufferSlice {
         }
     }
 
-    fn _slice(self, bounds: impl RangeBounds<wgpu::BufferAddress>) -> Self {
-        // TODO: write tests and handle integer overflow
-        let start = match (self.start, bounds.start_bound().cloned()) {
-            (Bound::Included(o), Bound::Included(i)) => Bound::Included(o.max(i)),
-            (Bound::Included(o), Bound::Excluded(i)) => Bound::Included(o.max(i + 1)),
-            (Bound::Excluded(o), Bound::Included(i)) => Bound::Excluded(o.max(i - 1)),
-            (Bound::Excluded(o), Bound::Excluded(i)) => Bound::Excluded(o.max(i)),
-            (o, Bound::Unbounded) => o,
-            (Bound::Unbounded, i) => i,
-        };
-        let end = match (self.start, bounds.start_bound().cloned()) {
-            (Bound::Included(o), Bound::Included(i)) => Bound::Included(o.min(i)),
-            (Bound::Included(o), Bound::Excluded(i)) => Bound::Included(o.min(i + 1)),
-            (Bound::Excluded(o), Bound::Included(i)) => Bound::Excluded(o.min(i - 1)),
-            (Bound::Excluded(o), Bound::Excluded(i)) => Bound::Excluded(o.min(i)),
-            (o, Bound::Unbounded) => o,
-            (Bound::Unbounded, i) => i,
-        };
-
-        Self {
-            buffer: self.buffer,
-            start,
-            end,
-        }
-    }
-
     fn as_slice<'a>(&'a self) -> wgpu::BufferSlice<'a> {
         self.buffer.slice((self.start, self.end))
     }
