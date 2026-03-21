@@ -4,6 +4,8 @@ mod gltf_loader;
 #[allow(clippy::all)]
 mod shaders;
 
+use std::ops::{Bound, RangeBounds};
+
 use eframe::egui::{self, ahash::HashMap};
 use eframe::{egui_wgpu, wgpu};
 use puffin::profile_function;
@@ -57,30 +59,70 @@ struct Node {
     bgroup: NodeBindGroup,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Mesh {
     primitives: Vec<Primitive>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Primitive {
     pipeline: wgpu::RenderPipeline,
-    attrib_buffers: Vec<AttribBuffer>,
+    attrib_buffers: Vec<OwnedBufferSlice>,
     draw_count: u32,
     index_data: Option<PrimitiveIndexData>,
 }
 
-#[derive(Debug)]
-struct AttribBuffer {
-    buffer: wgpu::Buffer,
-    offset: wgpu::BufferAddress,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrimitiveIndexData {
+    format: wgpu::IndexFormat,
+    buffer_slice: OwnedBufferSlice,
 }
 
-#[derive(Debug)]
-struct PrimitiveIndexData {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnedBufferSlice {
     buffer: wgpu::Buffer,
-    format: wgpu::IndexFormat,
-    offset: u64,
+    start: Bound<wgpu::BufferAddress>,
+    end: Bound<wgpu::BufferAddress>,
+}
+
+impl OwnedBufferSlice {
+    fn new(buffer: wgpu::Buffer, bounds: impl RangeBounds<wgpu::BufferAddress>) -> Self {
+        Self {
+            buffer,
+            start: bounds.start_bound().cloned(),
+            end: bounds.end_bound().cloned(),
+        }
+    }
+
+    fn _slice(self, bounds: impl RangeBounds<wgpu::BufferAddress>) -> Self {
+        // TODO: write tests and handle integer overflow
+        let start = match (self.start, bounds.start_bound().cloned()) {
+            (Bound::Included(o), Bound::Included(i)) => Bound::Included(o.max(i)),
+            (Bound::Included(o), Bound::Excluded(i)) => Bound::Included(o.max(i + 1)),
+            (Bound::Excluded(o), Bound::Included(i)) => Bound::Excluded(o.max(i - 1)),
+            (Bound::Excluded(o), Bound::Excluded(i)) => Bound::Excluded(o.max(i)),
+            (o, Bound::Unbounded) => o,
+            (Bound::Unbounded, i) => i,
+        };
+        let end = match (self.start, bounds.start_bound().cloned()) {
+            (Bound::Included(o), Bound::Included(i)) => Bound::Included(o.min(i)),
+            (Bound::Included(o), Bound::Excluded(i)) => Bound::Included(o.min(i + 1)),
+            (Bound::Excluded(o), Bound::Included(i)) => Bound::Excluded(o.min(i - 1)),
+            (Bound::Excluded(o), Bound::Excluded(i)) => Bound::Excluded(o.min(i)),
+            (o, Bound::Unbounded) => o,
+            (Bound::Unbounded, i) => i,
+        };
+
+        Self {
+            buffer: self.buffer,
+            start,
+            end,
+        }
+    }
+
+    fn as_slice<'a>(&'a self) -> wgpu::BufferSlice<'a> {
+        self.buffer.slice((self.start, self.end))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,11 +324,11 @@ impl SceneRenderer {
                 for primitive in &mesh.primitives {
                     rpass.set_pipeline(&primitive.pipeline);
                     for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
-                        rpass.set_vertex_buffer(i as _, attrib.buffer.slice(attrib.offset..));
+                        rpass.set_vertex_buffer(i as _, attrib.as_slice());
                     }
                     if let Some(index_data) = &primitive.index_data {
                         rpass.set_index_buffer(
-                            index_data.buffer.slice(index_data.offset..),
+                            index_data.buffer_slice.as_slice(),
                             index_data.format,
                         );
                         rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);

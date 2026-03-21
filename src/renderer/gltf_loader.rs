@@ -1,5 +1,7 @@
+use crate::renderer::OwnedBufferSlice;
+
 use super::{
-    Asset, AttribBuffer, DEPTH_FORMAT, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
+    Asset, DEPTH_FORMAT, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
     NodeBindGroupEntriesParams, Primitive, PrimitiveIndexData, scene,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
@@ -208,9 +210,12 @@ fn generate_meshes(
                             let (buf_offset, attrib_offset) = if accessor.offset() >= stride as _
                                 || stride > device.limits().max_vertex_buffer_array_stride as _
                             {
-                                (accessor.offset(), 0)
+                                (
+                                    accessor.offset() as wgpu::BufferAddress,
+                                    0 as wgpu::BufferAddress,
+                                )
                             } else {
-                                (0, accessor.offset())
+                                (0 as _, accessor.offset() as wgpu::BufferAddress)
                             };
                             Some((
                                 AttributeInfo {
@@ -221,10 +226,10 @@ fn generate_meshes(
                                         shader_location,
                                     },
                                 },
-                                AttribBuffer {
-                                    buffer: buffers[buffer_view.index()].clone(),
-                                    offset: buf_offset as _,
-                                },
+                                OwnedBufferSlice::new(
+                                    buffers[buffer_view.index()].clone(),
+                                    buf_offset..,
+                                ),
                             ))
                         })
                         .unzip();
@@ -253,13 +258,15 @@ fn generate_meshes(
                         use gltf::accessor::DataType;
                         draw_count = indices.count() as _;
                         PrimitiveIndexData {
-                            buffer: buffers[indices.view().unwrap().index()].clone(),
+                            buffer_slice: OwnedBufferSlice::new(
+                                buffers[indices.view().unwrap().index()].clone(),
+                                (indices.offset() as wgpu::BufferAddress)..,
+                            ),
                             format: match indices.data_type() {
                                 DataType::U16 => wgpu::IndexFormat::Uint16,
                                 DataType::U32 => wgpu::IndexFormat::Uint32,
                                 t => unimplemented!("Index type {:?} is not supported", t),
                             },
-                            offset: indices.offset() as _,
                         }
                     });
 
