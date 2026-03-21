@@ -60,17 +60,17 @@ pub async fn load_asset(
 
     let buffers: Vec<_> = doc
         .views()
-        .map(|view: gltf::buffer::View| {
-            let data = &buffer_data[view.buffer().index()];
-            let contents = &data[view.offset()..view.offset() + view.length()];
-            let target_flags = match view.target() {
+        .map(|doc_view: gltf::buffer::View| {
+            let data = &buffer_data[doc_view.buffer().index()];
+            let contents = &data[doc_view.offset()..doc_view.offset() + doc_view.length()];
+            let target_flags = match doc_view.target() {
                 Some(gltf::buffer::Target::ArrayBuffer) => wgpu::BufferUsages::VERTEX,
                 Some(gltf::buffer::Target::ElementArrayBuffer) => wgpu::BufferUsages::INDEX,
                 None => wgpu::BufferUsages::empty(),
             };
             let usage = wgpu::BufferUsages::COPY_DST | target_flags;
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: view.name(),
+                label: doc_view.name(),
                 contents,
                 usage,
             })
@@ -79,7 +79,7 @@ pub async fn load_asset(
 
     // Build Nodes
 
-    let nodes = generate_nodes(&doc, device);
+    let nodes = generate_nodes(device, &doc);
 
     // Build Meshes
 
@@ -106,11 +106,11 @@ async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
     Ok(data)
 }
 
-fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
+fn generate_nodes(device: &wgpu::Device, doc: &gltf::Document) -> Vec<Node> {
     // Get world transforms
     let mut nodes_to_visit = Vec::new();
-    for scene in doc.scenes() {
-        nodes_to_visit.extend(scene.nodes().map(|n| (n, Mat4::IDENTITY)));
+    for doc_scene in doc.scenes() {
+        nodes_to_visit.extend(doc_scene.nodes().map(|n| (n, Mat4::IDENTITY)));
     }
     let mut world_transforms = vec![Mat4::IDENTITY; doc.nodes().len()];
     while let Some((node, parent_transform)) = nodes_to_visit.pop() {
@@ -151,10 +151,10 @@ fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
 
     doc.nodes()
         .zip(world_transforms.iter())
-        .filter_map(|(node, &transform)| {
-            node.mesh().map(|mesh| {
+        .filter_map(|(doc_node, &transform)| {
+            doc_node.mesh().map(|doc_mesh| {
                 let node_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: node.name(),
+                    label: doc_node.name(),
                     contents: bytemuck::bytes_of(&scene::Node {
                         transform,
                         normal_transform: Mat4::from_mat3(
@@ -171,7 +171,7 @@ fn generate_nodes(doc: &gltf::Document, device: &wgpu::Device) -> Vec<Node> {
                 );
                 Node {
                     bgroup,
-                    mesh_index: mesh.index(),
+                    mesh_index: doc_mesh.index(),
                 }
             })
         })
