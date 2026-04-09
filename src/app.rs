@@ -44,8 +44,8 @@ impl eframe::App for RendererApp {
         eframe::set_value(storage, eframe::APP_KEY, self);
     }
 
-    /// Called each time the UI needs repainting, which may be many times per second.
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    /// Called when the UI is being composed. This is where all rendering happens.
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let render_state = frame
             .wgpu_render_state()
             .expect("WGPU is not properly initialized");
@@ -55,16 +55,19 @@ impl eframe::App for RendererApp {
             .callback_resources
             .get_mut::<SceneRenderer>()
         {
-            renderer.run_ui(ctx, render_state);
+            renderer.run_ui(ui, render_state);
         }
 
         // Run our custom rendering as a callback. Normally eframe is set up to allow you to handle custom rendering in
         // panels, windows, and other widgets. But the rendering is the star of the show here, so we'll render to the
         // whole screen
-        ctx.layer_painter(LayerId::background()).add(
-            eframe::egui_wgpu::Callback::new_paint_callback(ctx.available_rect(), CustomCallback),
-        );
-        ctx.request_repaint();
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            ui.painter()
+                .add(eframe::egui_wgpu::Callback::new_paint_callback(
+                    ui.viewport_rect(),
+                    CustomCallback,
+                ));
+        });
     }
 }
 

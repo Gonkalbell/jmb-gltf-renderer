@@ -403,10 +403,10 @@ pub mod scene {
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Scene::PipelineLayout"),
             bind_group_layouts: &[
-                &bgroup_camera::WgpuBindGroup0::get_bind_group_layout(device),
-                &WgpuBindGroup1::get_bind_group_layout(device),
+                Some(&bgroup_camera::WgpuBindGroup0::get_bind_group_layout(device)),
+                Some(&WgpuBindGroup1::get_bind_group_layout(device)),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         })
     }
     pub fn create_shader_module_embed_source(device: &wgpu::Device) -> wgpu::ShaderModule {
@@ -442,12 +442,12 @@ struct VertexOutput {
 const LIGHT_DIR: vec3<f32> = vec3<f32>(0.25f, 0.5f, 1f);
 const AMBIENT_COLOR: vec3<f32> = vec3(0.1f);
 
-@group(0) @binding(0) 
+@group(0) @binding(0)
 var<uniform> res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX: CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX;
-@group(1) @binding(0) 
+@group(1) @binding(0)
 var<uniform> res_node: Node;
 
-@vertex 
+@vertex
 fn vs_scene(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
 
@@ -462,7 +462,7 @@ fn vs_scene(input: VertexInput) -> VertexOutput {
     return _e31;
 }
 
-@fragment 
+@fragment
 fn fs_scene(input_1: VertexOutput) -> @location(0) vec4<f32> {
     let N = normalize(input_1.normal);
     let L = normalize(LIGHT_DIR);
@@ -634,10 +634,10 @@ pub mod skybox {
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Skybox::PipelineLayout"),
             bind_group_layouts: &[
-                &bgroup_camera::WgpuBindGroup0::get_bind_group_layout(device),
-                &WgpuBindGroup1::get_bind_group_layout(device),
+                Some(&bgroup_camera::WgpuBindGroup0::get_bind_group_layout(device)),
+                Some(&WgpuBindGroup1::get_bind_group_layout(device)),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         })
     }
     pub fn create_shader_module_embed_source(device: &wgpu::Device) -> wgpu::ShaderModule {
@@ -660,14 +660,14 @@ struct SkyboxInterp {
     @location(0) tex_coord: vec3<f32>,
 }
 
-@group(0) @binding(0) 
+@group(0) @binding(0)
 var<uniform> res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX: CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX;
-@group(1) @binding(0) 
+@group(1) @binding(0)
 var res_texture: texture_cube<f32>;
-@group(1) @binding(1) 
+@group(1) @binding(1)
 var res_sampler: sampler;
 
-@vertex 
+@vertex
 fn vs_skybox(@builtin(vertex_index) vertex_index: u32) -> SkyboxInterp {
     var result: SkyboxInterp;
 
@@ -683,7 +683,7 @@ fn vs_skybox(@builtin(vertex_index) vertex_index: u32) -> SkyboxInterp {
     return _e35;
 }
 
-@fragment 
+@fragment
 fn fs_skybox(vertex: SkyboxInterp) -> @location(0) vec4<f32> {
     let _e4 = textureSample(res_texture, res_sampler, vertex.tex_coord);
     return _e4;

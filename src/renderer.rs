@@ -182,7 +182,7 @@ impl SceneRenderer {
                     address_mode_w: wgpu::AddressMode::ClampToEdge,
                     mag_filter: wgpu::FilterMode::Linear,
                     min_filter: wgpu::FilterMode::Linear,
-                    mipmap_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
                     ..Default::default()
                 }),
             }),
@@ -203,13 +203,13 @@ impl SceneRenderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -318,16 +318,17 @@ impl SceneRenderer {
         rpass.draw(0..3, 0..1);
     }
 
-    pub fn run_ui(&mut self, ctx: &egui::Context, render_state: &egui_wgpu::RenderState) {
+    pub fn run_ui(&mut self, ui: &mut egui::Ui, render_state: &egui_wgpu::RenderState) {
         profile_function!();
 
-        if !ctx.wants_keyboard_input() && !ctx.wants_pointer_input() {
+        let ctx = ui.ctx();
+        if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
             ctx.input(|input| {
                 self.user_camera.update(input);
             });
         }
 
-        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+        egui::Panel::top("top_panel").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Asset", |ui| {
                     self.show_scene_menu(&render_state.device, render_state.target_format, ui);
