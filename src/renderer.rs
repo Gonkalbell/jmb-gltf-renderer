@@ -337,23 +337,105 @@ impl SceneRenderer {
                 ui.menu_button("Camera", |ui| self.user_camera.run_ui(ui));
 
                 ui.menu_button("Info", |ui| {
-                    ui.menu_button("Adapter", |ui| {
-                        let info = render_state.adapter.get_info();
-                        ui.label(format!("name: {}", info.name));
-                        ui.label(format!("backend: {}", info.backend));
-                        ui.label(format!("driver: {}", info.driver));
-                        ui.label(format!("driver info: {}", info.driver_info));
-                        ui.label(format!("type: {:?}", info.device_type));
-                    });
-                    if let Some(asset) = self.asset_rx.borrow().as_ref() {
-                        ui.menu_button("Asset", |ui| {
-                            ui.label(format!("nodes: {}", asset.nodes.len()));
-                            ui.label(format!("meshes: {}", asset.meshes.len()));
-                        });
-                    }
+                    self.show_info_menu(render_state, ui);
                 });
             });
         });
+    }
+
+    fn show_info_menu(&mut self, render_state: &egui_wgpu::RenderState, ui: &mut egui::Ui) {
+        ui.menu_button("Adapter", |ui| {
+            let info = render_state.adapter.get_info();
+            ui.label(format!("name: {}", info.name));
+            ui.label(format!("backend: {}", info.backend));
+            ui.label(format!("driver: {}", info.driver));
+            ui.label(format!("driver info: {}", info.driver_info));
+            ui.label(format!("type: {:?}", info.device_type));
+        });
+        if let Some(asset) = self.asset_rx.borrow().as_ref() {
+            ui.menu_button("Asset", |ui| {
+                ui.label(format!("nodes: {}", asset.nodes.len()));
+                ui.label(format!("meshes: {}", asset.meshes.len()));
+            });
+        }
+        ui.menu_button("Counters", |ui| {
+            let counters = render_state.device.get_internal_counters().hal;
+            ui.label(format!("buffers: {}", counters.buffers.read()));
+            ui.label(format!("textures: {}", counters.textures.read()));
+            ui.label(format!("texture_views: {}", counters.texture_views.read()));
+            ui.label(format!("bind_groups: {}", counters.bind_groups.read()));
+            ui.label(format!(
+                "bind_group_layouts: {}",
+                counters.bind_group_layouts.read()
+            ));
+            ui.label(format!(
+                "render_pipelines: {}",
+                counters.render_pipelines.read()
+            ));
+            ui.label(format!(
+                "compute_pipelines: {}",
+                counters.compute_pipelines.read()
+            ));
+            ui.label(format!(
+                "pipeline_layouts: {}",
+                counters.pipeline_layouts.read()
+            ));
+            ui.label(format!("samplers: {}", counters.samplers.read()));
+            ui.label(format!(
+                "command_encoders: {}",
+                counters.command_encoders.read()
+            ));
+            ui.label(format!(
+                "shader_modules: {}",
+                counters.shader_modules.read()
+            ));
+            ui.label(format!("query_sets: {}", counters.query_sets.read()));
+            ui.label(format!("fences: {}", counters.fences.read()));
+            ui.label(format!("buffer_memory: {}", counters.buffer_memory.read()));
+            ui.label(format!(
+                "texture_memory: {}",
+                counters.texture_memory.read()
+            ));
+            ui.label(format!(
+                "acceleration_structure_memory: {}",
+                counters.acceleration_structure_memory.read()
+            ));
+            ui.label(format!(
+                "memory_allocations: {}",
+                counters.memory_allocations.read()
+            ));
+        });
+
+        if let Some(report) = render_state.device.generate_allocator_report() {
+            ui.menu_button("Allocation Report", |ui| {
+                for (i, block) in report.blocks.iter().enumerate() {
+                    ui.menu_button(format!("block {}: {}", i, block.size), |ui| {
+                        let mut sorted_allocations =
+                            report.allocations[block.allocations.clone()].to_owned();
+                        sorted_allocations.sort_by(|a, b| a.offset.cmp(&b.offset));
+                        for allocation in sorted_allocations.iter() {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{:08X}-{:08X} {}",
+                                    allocation.offset,
+                                    allocation.offset + allocation.size,
+                                    allocation.name
+                                ))
+                                .monospace(),
+                            );
+                        }
+                    });
+                }
+                ui.label(format!(
+                    "total_allocated_bytes: {}",
+                    report.total_allocated_bytes
+                ));
+                ui.label(format!(
+                    "total_allocated_bytes: {}",
+                    report.total_reserved_bytes
+                ));
+            });
+        }
     }
 
     fn show_scene_menu(

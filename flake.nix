@@ -40,6 +40,9 @@
             libXi
             libX11
 
+            # Vulkan dependencies
+            vulkan-loader
+            mesa
           ];
 
           LD_LIBRARY_PATH = "${lib.makeLibraryPath buildInputs}";

@@ -1,7 +1,7 @@
 //! Since I mostly want to do my own rendering, very little actually happens in the top level `App` struct. Instead,
 //! most of the rendering logic actually happens in `renderer.rs`
 
-use eframe::egui::{self, LayerId};
+use eframe::egui;
 use eframe::egui_wgpu::CallbackTrait;
 
 use crate::renderer::SceneRenderer;
