@@ -149,8 +149,8 @@ pub mod bgroup_camera {
             self.into_array().into_iter().collect()
         }
     }
-    #[derive(Debug)]
-    pub struct WgpuBindGroup0(wgpu::BindGroup);
+    #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
+    pub struct WgpuBindGroup0(pub wgpu::BindGroup);
     impl WgpuBindGroup0 {
         pub const LAYOUT_DESCRIPTOR: wgpu::BindGroupLayoutDescriptor<'static> =
             wgpu::BindGroupLayoutDescriptor {
@@ -332,8 +332,8 @@ pub mod scene {
             self.into_array().into_iter().collect()
         }
     }
-    #[derive(Debug)]
-    pub struct WgpuBindGroup1(wgpu::BindGroup);
+    #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
+    pub struct WgpuBindGroup1(pub wgpu::BindGroup);
     impl WgpuBindGroup1 {
         pub const LAYOUT_DESCRIPTOR: wgpu::BindGroupLayoutDescriptor<'static> =
             wgpu::BindGroupLayoutDescriptor {
@@ -562,8 +562,8 @@ pub mod skybox {
             self.into_array().into_iter().collect()
         }
     }
-    #[derive(Debug)]
-    pub struct WgpuBindGroup1(wgpu::BindGroup);
+    #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
+    pub struct WgpuBindGroup1(pub wgpu::BindGroup);
     impl WgpuBindGroup1 {
         pub const LAYOUT_DESCRIPTOR: wgpu::BindGroupLayoutDescriptor<'static> =
             wgpu::BindGroupLayoutDescriptor {

@@ -28,7 +28,7 @@ wgpu = { version = "29", features = ["counters"] }
 
 [build-dependencies]
 miette = { version = "7.2", features = ["fancy"] }
-wgsl_bindgen = "0.22"
+wgsl_bindgen = { git = "https://github.com/Gonkalbell/wgsl-bindgen.git" }
 
 # native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

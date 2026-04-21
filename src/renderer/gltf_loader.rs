@@ -1,8 +1,8 @@
-use crate::renderer::OwnedBufferSlice;
+use crate::renderer::{OwnedBufferSlice, RenderBatch};
 
 use super::{
-    Asset, DEPTH_FORMAT, Mesh, Node, NodeBindGroup, NodeBindGroupEntries,
-    NodeBindGroupEntriesParams, Primitive, PrimitiveIndexData, scene,
+    Asset, DEPTH_FORMAT, NodeBindGroup, NodeBindGroupEntries, NodeBindGroupEntriesParams,
+    Primitive, PrimitiveIndexData, scene,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
@@ -79,24 +79,14 @@ pub async fn load_asset(
 
     // Build Nodes
 
-    let nodes = generate_nodes(device, &doc);
+    let mesh_instances = generate_nodes(device, &doc);
 
     // Build Meshes
 
-    let shader = scene::create_shader_module_embed_source(device);
-    let mut pipeline_cache = HashMap::new();
+    let batches = generate_meshes(device, &doc, color_format, &buffers, &mesh_instances);
 
-    let mut pipeline_cache_fn = |key: PipelineCacheKey| {
-        pipeline_cache
-            .entry(key)
-            .or_insert_with_key(|key| create_pipeline(device, color_format, &shader, None, key))
-            .clone()
-    };
-
-    let meshes = generate_meshes(device, doc, buffers, &mut pipeline_cache_fn);
     log::info!("finished loading {}", &url);
-
-    Ok(Asset { nodes, meshes })
+    Ok(Asset { batches })
 }
 
 async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
@@ -106,7 +96,13 @@ async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
     Ok(data)
 }
 
-fn generate_nodes(device: &wgpu::Device, doc: &gltf::Document) -> Vec<Node> {
+#[derive(Hash, Eq, PartialEq, PartialOrd, Ord)]
+struct MeshIndex(usize);
+
+fn generate_nodes(
+    device: &wgpu::Device,
+    doc: &gltf::Document,
+) -> HashMap<MeshIndex, Vec<NodeBindGroup>> {
     // Get world transforms
     let mut nodes_to_visit = Vec::new();
     for doc_scene in doc.scenes() {
@@ -149,151 +145,154 @@ fn generate_nodes(device: &wgpu::Device, doc: &gltf::Document) -> Vec<Node> {
         *transform = inv_bounding_box_matrix * *transform;
     }
 
-    doc.nodes()
-        .zip(world_transforms.iter())
-        .filter_map(|(doc_node, &transform)| {
-            doc_node.mesh().map(|doc_mesh| {
-                let node_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: doc_node.name(),
-                    contents: bytemuck::bytes_of(&scene::Node {
-                        transform,
-                        normal_transform: Mat4::from_mat3(
-                            Mat3::from_mat4(transform).inverse().transpose(),
-                        ),
-                    }),
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                });
-                let bgroup = NodeBindGroup::from_bindings(
-                    device,
-                    NodeBindGroupEntries::new(NodeBindGroupEntriesParams {
-                        res_node: node_buf.as_entire_buffer_binding(),
-                    }),
-                );
-                Node {
-                    bgroup,
-                    mesh_index: doc_mesh.index(),
-                }
-            })
-        })
-        .collect()
+    let mut mesh_instances: HashMap<MeshIndex, Vec<NodeBindGroup>> = HashMap::new();
+    for (doc_node, &transform) in doc.nodes().zip(world_transforms.iter()) {
+        if let Some(doc_mesh) = doc_node.mesh() {
+            let node_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: doc_node.name(),
+                contents: bytemuck::bytes_of(&scene::Node {
+                    transform,
+                    normal_transform: Mat4::from_mat3(
+                        Mat3::from_mat4(transform).inverse().transpose(),
+                    ),
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bgroup = NodeBindGroup::from_bindings(
+                device,
+                NodeBindGroupEntries::new(NodeBindGroupEntriesParams {
+                    res_node: node_buf.as_entire_buffer_binding(),
+                }),
+            );
+            mesh_instances
+                .entry(MeshIndex(doc_mesh.index()))
+                .or_default()
+                .push(bgroup);
+        }
+    }
+
+    mesh_instances
 }
 
 fn generate_meshes(
     device: &wgpu::Device,
-    doc: gltf::Document,
-    buffers: Vec<wgpu::Buffer>,
-    pipeline_cache_fn: &mut impl FnMut(PipelineCacheKey) -> wgpu::RenderPipeline,
-) -> Vec<Mesh> {
-    doc.meshes()
-        .map(|doc_mesh| {
-            let primitives = doc_mesh
-                .primitives()
-                .map(|doc_primitive| {
-                    let vertex_count = doc_primitive
-                        .attributes()
-                        .next()
-                        .expect("There should be at least one attribute for each primitive")
-                        .1
-                        .count();
-                    let (attrib_layouts, attrib_buffers): (Vec<_>, Vec<_>) = doc_primitive
-                        .attributes()
-                        .filter_map(|(semantic, accessor)| {
-                            let shader_location = match semantic {
-                                gltf::Semantic::Positions => 0,
-                                gltf::Semantic::Normals => 1,
-                                _ => return None,
-                            };
+    doc: &gltf::Document,
+    color_format: wgpu::TextureFormat,
+    buffers: &[wgpu::Buffer],
+    mesh_instances: &HashMap<MeshIndex, Vec<NodeBindGroup>>,
+) -> Vec<RenderBatch> {
+    let shader = scene::create_shader_module_embed_source(device);
+    let mut batches = HashMap::new();
 
-                            let buffer_view =
-                                accessor.view().expect("Accessor should have a buffer view");
-                            let format = get_vertex_format(&accessor);
-                            let stride = buffer_view
-                                .stride()
-                                .map(|s| s as u64)
-                                .unwrap_or(format.size());
-                            let (buf_offset, attrib_offset) = if accessor.offset() >= stride as _
-                                || stride > device.limits().max_vertex_buffer_array_stride as _
-                            {
-                                (
-                                    accessor.offset() as wgpu::BufferAddress,
-                                    0 as wgpu::BufferAddress,
-                                )
-                            } else {
-                                (0 as _, accessor.offset() as wgpu::BufferAddress)
-                            };
-                            Some((
-                                AttributeInfo {
-                                    array_stride: stride,
-                                    attribute: wgpu::VertexAttribute {
-                                        format,
-                                        offset: attrib_offset as _,
-                                        shader_location,
-                                    },
-                                },
-                                OwnedBufferSlice::new(
-                                    buffers[buffer_view.index()].clone(),
-                                    buf_offset..,
-                                ),
-                            ))
-                        })
-                        .unzip();
-
-                    let primitive_state = wgpu::PrimitiveState {
-                        topology: match doc_primitive.mode() {
-                            Mode::Points => wgpu::PrimitiveTopology::PointList,
-                            Mode::Lines => wgpu::PrimitiveTopology::LineList,
-                            Mode::LineStrip => wgpu::PrimitiveTopology::LineStrip,
-                            Mode::Triangles => wgpu::PrimitiveTopology::TriangleList,
-                            Mode::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
-                            mode => unimplemented!("format {:?} not supported", mode),
-                        },
-                        cull_mode: Some(wgpu::Face::Back),
-                        front_face: wgpu::FrontFace::Ccw,
-                        ..Default::default()
+    for doc_mesh in doc.meshes() {
+        for doc_primitive in doc_mesh.primitives() {
+            let vertex_count = doc_primitive
+                .attributes()
+                .next()
+                .expect("There should be at least one attribute for each primitive")
+                .1
+                .count();
+            let (attrib_layouts, attrib_buffers): (Vec<_>, Vec<_>) = doc_primitive
+                .attributes()
+                .filter_map(|(semantic, accessor)| {
+                    let shader_location = match semantic {
+                        gltf::Semantic::Positions => 0,
+                        gltf::Semantic::Normals => 1,
+                        _ => return None,
                     };
-                    let key = PipelineCacheKey {
-                        attributes: attrib_layouts,
-                        primitive_state,
-                    };
-                    let pipeline = pipeline_cache_fn(key);
 
-                    let mut draw_count = vertex_count as u32;
-                    let index_data = doc_primitive.indices().map(|indices| {
-                        use gltf::accessor::DataType;
-                        draw_count = indices.count() as _;
-                        PrimitiveIndexData {
-                            buffer_slice: OwnedBufferSlice::new(
-                                buffers[indices.view().unwrap().index()].clone(),
-                                (indices.offset() as wgpu::BufferAddress)..,
-                            ),
-                            format: match indices.data_type() {
-                                DataType::U16 => wgpu::IndexFormat::Uint16,
-                                DataType::U32 => wgpu::IndexFormat::Uint32,
-                                t => unimplemented!("Index type {:?} is not supported", t),
+                    let buffer_view = accessor.view().expect("Accessor should have a buffer view");
+                    let format = get_vertex_format(&accessor);
+                    let stride = buffer_view
+                        .stride()
+                        .map(|s| s as u64)
+                        .unwrap_or(format.size());
+                    let (buf_offset, attrib_offset) = if accessor.offset() >= stride as _
+                        || stride > device.limits().max_vertex_buffer_array_stride as _
+                    {
+                        (
+                            accessor.offset() as wgpu::BufferAddress,
+                            0 as wgpu::BufferAddress,
+                        )
+                    } else {
+                        (0 as _, accessor.offset() as wgpu::BufferAddress)
+                    };
+                    Some((
+                        AttributeInfo {
+                            array_stride: stride,
+                            attribute: wgpu::VertexAttribute {
+                                format,
+                                offset: attrib_offset as _,
+                                shader_location,
                             },
-                        }
-                    });
-
-                    Primitive {
-                        pipeline,
-                        attrib_buffers,
-                        draw_count,
-                        index_data,
-                    }
+                        },
+                        OwnedBufferSlice::new(buffers[buffer_view.index()].clone(), buf_offset..),
+                    ))
                 })
-                .collect();
-            Mesh { primitives }
-        })
-        .collect()
+                .unzip();
+
+            let primitive_state = wgpu::PrimitiveState {
+                topology: match doc_primitive.mode() {
+                    Mode::Points => wgpu::PrimitiveTopology::PointList,
+                    Mode::Lines => wgpu::PrimitiveTopology::LineList,
+                    Mode::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+                    Mode::Triangles => wgpu::PrimitiveTopology::TriangleList,
+                    Mode::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+                    mode => unimplemented!("format {:?} not supported", mode),
+                },
+                cull_mode: Some(wgpu::Face::Back),
+                front_face: wgpu::FrontFace::Ccw,
+                ..Default::default()
+            };
+            let key = PipelineCacheKey {
+                attributes: attrib_layouts,
+                primitive_state,
+            };
+
+            let mut draw_count = vertex_count as u32;
+            let index_data = doc_primitive.indices().map(|indices| {
+                use gltf::accessor::DataType;
+                draw_count = indices.count() as _;
+                PrimitiveIndexData {
+                    buffer_slice: OwnedBufferSlice::new(
+                        buffers[indices.view().unwrap().index()].clone(),
+                        (indices.offset() as wgpu::BufferAddress)..,
+                    ),
+                    format: match indices.data_type() {
+                        DataType::U16 => wgpu::IndexFormat::Uint16,
+                        DataType::U32 => wgpu::IndexFormat::Uint32,
+                        t => unimplemented!("Index type {:?} is not supported", t),
+                    },
+                }
+            });
+
+            let batch = batches.entry(key).or_insert_with_key(|key| {
+                create_render_batch(device, color_format, &shader, None, key)
+            });
+            let nodes = mesh_instances
+                .get(&MeshIndex(doc_mesh.index()))
+                .unwrap()
+                .clone();
+
+            batch.mesh_primitives.push(Primitive {
+                attrib_buffers,
+                draw_count,
+                index_data,
+                nodes,
+            });
+        }
+    }
+
+    batches.into_values().collect()
 }
 
-fn create_pipeline(
+fn create_render_batch(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
     shader: &wgpu::ShaderModule,
     label: Option<&str>,
     key: &PipelineCacheKey,
-) -> wgpu::RenderPipeline {
+) -> RenderBatch {
     let attrib_buffer_layouts: Vec<_> = key
         .attributes
         .iter()
@@ -309,7 +308,7 @@ fn create_pipeline(
         )
         .collect();
 
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label,
         layout: Some(&scene::create_pipeline_layout(device)),
         vertex: wgpu::VertexState {
@@ -333,7 +332,12 @@ fn create_pipeline(
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
-    })
+    });
+
+    RenderBatch {
+        pipeline,
+        mesh_primitives: Vec::new(),
+    }
 }
 
 fn get_vertex_format(accessor: &gltf::Accessor) -> wgpu::VertexFormat {

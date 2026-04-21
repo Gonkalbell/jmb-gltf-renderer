@@ -49,27 +49,23 @@ pub struct SceneRenderer {
     asset_list: Receiver<Vec<ModelLinkInfo>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Asset {
-    nodes: Vec<Node>,
-    meshes: Vec<Mesh>,
-}
-
-struct Node {
-    mesh_index: usize,
-    bgroup: NodeBindGroup,
+    batches: Vec<RenderBatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Mesh {
-    primitives: Vec<Primitive>,
+struct RenderBatch {
+    pipeline: wgpu::RenderPipeline,
+    mesh_primitives: Vec<Primitive>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Primitive {
-    pipeline: wgpu::RenderPipeline,
     attrib_buffers: Vec<OwnedBufferSlice>,
     draw_count: u32,
     index_data: Option<PrimitiveIndexData>,
+    nodes: Vec<NodeBindGroup>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,27 +283,30 @@ impl SceneRenderer {
 
         self.camera_bgroup.set(rpass);
 
-        let scene = self.asset_rx.borrow();
-        if let Some(asset) = scene.as_ref() {
-            for node in &asset.nodes {
-                node.bgroup.set(rpass);
-                let mesh = asset
-                    .meshes
-                    .get(node.mesh_index)
-                    .expect("Node didn't have a mesh");
-                for primitive in &mesh.primitives {
-                    rpass.set_pipeline(&primitive.pipeline);
+        if let Some(asset) = self.asset_rx.borrow().as_ref() {
+            for batch in asset.batches.iter() {
+                rpass.set_pipeline(&batch.pipeline);
+
+                for primitive in batch.mesh_primitives.iter() {
                     for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
                         rpass.set_vertex_buffer(i as _, attrib.as_slice());
                     }
+
                     if let Some(index_data) = &primitive.index_data {
                         rpass.set_index_buffer(
                             index_data.buffer_slice.as_slice(),
                             index_data.format,
                         );
-                        rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);
-                    } else {
-                        rpass.draw(0..primitive.draw_count, 0..1);
+                    }
+
+                    for node in primitive.nodes.iter() {
+                        node.set(rpass);
+
+                        if primitive.index_data.is_none() {
+                            rpass.draw(0..primitive.draw_count, 0..1);
+                        } else {
+                            rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);
+                        }
                     }
                 }
             }
@@ -352,12 +351,6 @@ impl SceneRenderer {
             ui.label(format!("driver info: {}", info.driver_info));
             ui.label(format!("type: {:?}", info.device_type));
         });
-        if let Some(asset) = self.asset_rx.borrow().as_ref() {
-            ui.menu_button("Asset", |ui| {
-                ui.label(format!("nodes: {}", asset.nodes.len()));
-                ui.label(format!("meshes: {}", asset.meshes.len()));
-            });
-        }
         ui.menu_button("Counters", |ui| {
             let counters = render_state.device.get_internal_counters().hal;
             ui.label(format!("buffers: {}", counters.buffers.read()));
