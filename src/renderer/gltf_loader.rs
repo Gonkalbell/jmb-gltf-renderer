@@ -8,6 +8,7 @@ use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use reqwest::Url;
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::ops::Range;
 use std::str::FromStr;
 use wgpu::util::DeviceExt;
@@ -86,8 +87,22 @@ pub async fn load_asset(
 
     let batches = generate_meshes(device, &doc, color_format, &buffers, &mesh_instances);
 
+    let mut asset_info = String::new();
+    let json_asset = &doc.as_json().asset;
+    writeln!(&mut asset_info, "version: {}", json_asset.version)?;
+    if let Some(min_version) = &json_asset.min_version {
+        writeln!(&mut asset_info, "min_version: {}", min_version)?;
+    }
+    if let Some(copyright) = &json_asset.copyright {
+        writeln!(&mut asset_info, "copyright: {}", copyright)?;
+    }
+    if let Some(generator) = &json_asset.generator {
+        writeln!(&mut asset_info, "generator: {}", generator)?;
+    }
+
     log::info!("finished loading {}", &url);
     Ok(Asset {
+        asset_info,
         batches,
         instance_bgroup,
     })

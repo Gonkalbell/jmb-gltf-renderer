@@ -6,6 +6,7 @@ mod shaders;
 
 use std::ops::{Bound, Range, RangeBounds};
 
+use eframe::egui::RichText;
 use eframe::{
     egui::{self, ahash::HashMap},
     egui_wgpu, wgpu,
@@ -53,6 +54,7 @@ pub struct SceneRenderer {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Asset {
+    asset_info: String,
     batches: Vec<RenderBatch>,
     instance_bgroup: InstanceBindGroup,
 }
@@ -333,6 +335,11 @@ impl SceneRenderer {
     }
 
     fn show_info_menu(&mut self, render_state: &egui_wgpu::RenderState, ui: &mut egui::Ui) {
+        if let Some(asset) = self.asset_rx.borrow().as_ref() {
+            ui.menu_button("Asset", |ui| {
+                ui.label(&asset.asset_info);
+            });
+        }
         ui.menu_button("Adapter", |ui| {
             let info = render_state.adapter.get_info();
             ui.label(format!("name: {}", info.name));
@@ -398,7 +405,7 @@ impl SceneRenderer {
                         sorted_allocations.sort_by(|a, b| a.offset.cmp(&b.offset));
                         for allocation in sorted_allocations.iter() {
                             ui.label(
-                                egui::RichText::new(format!(
+                                RichText::new(format!(
                                     "{:08X}-{:08X} {}",
                                     allocation.offset,
                                     allocation.offset + allocation.size,
