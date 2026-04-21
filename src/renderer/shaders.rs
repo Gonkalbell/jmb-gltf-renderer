@@ -2,7 +2,7 @@
 //
 // ^ wgsl_bindgen version 0.22.2
 // Changes made to this file will not be saved.
-// SourceHash: 9bc404f70c44d4b792c994ea25fda2b4d8bdaba3c3ff94cd26dd6ad9e5b4f183
+// SourceHash: c15e7df322e3006473f13953f2719fae7e1d677d92152ab72d0a3641dabc113f
 
 #![allow(unused, non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -84,16 +84,18 @@ pub mod layout_asserts {
         assert!(std::mem::align_of::<glam::Mat4>() == 16);
     };
     const BGROUP_CAMERA_CAMERA_ASSERTS: () = {
-        assert!(std::mem::offset_of!(bgroup_camera::Camera, view) == 0);
-        assert!(std::mem::offset_of!(bgroup_camera::Camera, view_inv) == 64);
-        assert!(std::mem::offset_of!(bgroup_camera::Camera, proj) == 128);
-        assert!(std::mem::offset_of!(bgroup_camera::Camera, proj_inv) == 192);
-        assert!(std::mem::size_of::<bgroup_camera::Camera>() == 256);
+        assert!(std::mem::offset_of!(bgroup_camera::Camera, world_to_local) == 0);
+        assert!(std::mem::offset_of!(bgroup_camera::Camera, local_to_world) == 64);
+        assert!(std::mem::offset_of!(bgroup_camera::Camera, local_to_proj) == 128);
+        assert!(std::mem::offset_of!(bgroup_camera::Camera, proj_to_local) == 192);
+        assert!(std::mem::offset_of!(bgroup_camera::Camera, world_to_proj) == 256);
+        assert!(std::mem::offset_of!(bgroup_camera::Camera, proj_to_world) == 320);
+        assert!(std::mem::size_of::<bgroup_camera::Camera>() == 384);
     };
-    const SCENE_NODE_ASSERTS: () = {
-        assert!(std::mem::offset_of!(scene::Node, transform) == 0);
-        assert!(std::mem::offset_of!(scene::Node, normal_transform) == 64);
-        assert!(std::mem::size_of::<scene::Node>() == 128);
+    const SCENE_INSTANCE_ASSERTS: () = {
+        assert!(std::mem::offset_of!(scene::Instance, local_to_world) == 0);
+        assert!(std::mem::offset_of!(scene::Instance, normal_local_to_world) == 64);
+        assert!(std::mem::size_of::<scene::Instance>() == 128);
     };
 }
 pub mod bgroup_camera {
@@ -102,26 +104,34 @@ pub mod bgroup_camera {
     #[derive(Debug, PartialEq, Clone, Copy, serde :: Serialize, serde :: Deserialize)]
     pub struct Camera {
         #[doc = "offset: 0, size: 64, type: `mat4x4<f32>`"]
-        pub view: glam::Mat4,
+        pub world_to_local: glam::Mat4,
         #[doc = "offset: 64, size: 64, type: `mat4x4<f32>`"]
-        pub view_inv: glam::Mat4,
+        pub local_to_world: glam::Mat4,
         #[doc = "offset: 128, size: 64, type: `mat4x4<f32>`"]
-        pub proj: glam::Mat4,
+        pub local_to_proj: glam::Mat4,
         #[doc = "offset: 192, size: 64, type: `mat4x4<f32>`"]
-        pub proj_inv: glam::Mat4,
+        pub proj_to_local: glam::Mat4,
+        #[doc = "offset: 256, size: 64, type: `mat4x4<f32>`"]
+        pub world_to_proj: glam::Mat4,
+        #[doc = "offset: 320, size: 64, type: `mat4x4<f32>`"]
+        pub proj_to_world: glam::Mat4,
     }
     impl Camera {
         pub const fn new(
-            view: glam::Mat4,
-            view_inv: glam::Mat4,
-            proj: glam::Mat4,
-            proj_inv: glam::Mat4,
+            world_to_local: glam::Mat4,
+            local_to_world: glam::Mat4,
+            local_to_proj: glam::Mat4,
+            proj_to_local: glam::Mat4,
+            world_to_proj: glam::Mat4,
+            proj_to_world: glam::Mat4,
         ) -> Self {
             Self {
-                view,
-                view_inv,
-                proj,
-                proj_inv,
+                world_to_local,
+                local_to_world,
+                local_to_proj,
+                proj_to_local,
+                world_to_proj,
+                proj_to_world,
             }
         }
     }
@@ -195,8 +205,8 @@ pub mod bytemuck_impls {
     use super::{_root, _root::*};
     unsafe impl bytemuck::Zeroable for bgroup_camera::Camera {}
     unsafe impl bytemuck::Pod for bgroup_camera::Camera {}
-    unsafe impl bytemuck::Zeroable for scene::Node {}
-    unsafe impl bytemuck::Pod for scene::Node {}
+    unsafe impl bytemuck::Zeroable for scene::Instance {}
+    unsafe impl bytemuck::Pod for scene::Instance {}
     unsafe impl bytemuck::Zeroable for scene::VertexInput {}
     unsafe impl bytemuck::Pod for scene::VertexInput {}
 }
@@ -204,17 +214,17 @@ pub mod scene {
     use super::{_root, _root::*};
     #[repr(C, align(16))]
     #[derive(Debug, PartialEq, Clone, Copy, serde :: Serialize, serde :: Deserialize)]
-    pub struct Node {
+    pub struct Instance {
         #[doc = "offset: 0, size: 64, type: `mat4x4<f32>`"]
-        pub transform: glam::Mat4,
+        pub local_to_world: glam::Mat4,
         #[doc = "offset: 64, size: 64, type: `mat4x4<f32>`"]
-        pub normal_transform: glam::Mat4,
+        pub normal_local_to_world: glam::Mat4,
     }
-    impl Node {
-        pub const fn new(transform: glam::Mat4, normal_transform: glam::Mat4) -> Self {
+    impl Instance {
+        pub const fn new(local_to_world: glam::Mat4, normal_local_to_world: glam::Mat4) -> Self {
             Self {
-                transform,
-                normal_transform,
+                local_to_world,
+                normal_local_to_world,
             }
         }
     }
@@ -310,23 +320,23 @@ pub mod scene {
     }
     #[derive(Debug)]
     pub struct WgpuBindGroup1EntriesParams<'a> {
-        pub res_node: wgpu::BufferBinding<'a>,
+        pub res_instances: wgpu::BufferBinding<'a>,
     }
     #[derive(Clone, Debug)]
     pub struct WgpuBindGroup1Entries<'a> {
-        pub res_node: wgpu::BindGroupEntry<'a>,
+        pub res_instances: wgpu::BindGroupEntry<'a>,
     }
     impl<'a> WgpuBindGroup1Entries<'a> {
         pub fn new(params: WgpuBindGroup1EntriesParams<'a>) -> Self {
             Self {
-                res_node: wgpu::BindGroupEntry {
+                res_instances: wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(params.res_node),
+                    resource: wgpu::BindingResource::Buffer(params.res_instances),
                 },
             }
         }
         pub fn into_array(self) -> [wgpu::BindGroupEntry<'a>; 1] {
-            [self.res_node]
+            [self.res_instances]
         }
         pub fn collect<B: FromIterator<wgpu::BindGroupEntry<'a>>>(self) -> B {
             self.into_array().into_iter().collect()
@@ -339,18 +349,14 @@ pub mod scene {
             wgpu::BindGroupLayoutDescriptor {
                 label: Some("Scene::BindGroup1::LayoutDescriptor"),
                 entries: &[
-                    #[doc = " @binding(0): \"res_node\""]
+                    #[doc = " @binding(0): \"res_instances\""]
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
-                            min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<
-                                _root::scene::Node,
-                            >(
-                            )
-                                as _),
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -420,15 +426,17 @@ pub mod scene {
     }
     pub const SHADER_STRING: &str = r#"
 struct CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX {
-    view: mat4x4<f32>,
-    view_inv: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    proj_inv: mat4x4<f32>,
+    world_to_local: mat4x4<f32>,
+    local_to_world: mat4x4<f32>,
+    local_to_proj: mat4x4<f32>,
+    proj_to_local: mat4x4<f32>,
+    world_to_proj: mat4x4<f32>,
+    proj_to_world: mat4x4<f32>,
 }
 
-struct Node {
-    transform: mat4x4<f32>,
-    normal_transform: mat4x4<f32>,
+struct Instance {
+    local_to_world: mat4x4<f32>,
+    normal_local_to_world: mat4x4<f32>,
 }
 
 struct VertexInput {
@@ -447,21 +455,23 @@ const AMBIENT_COLOR: vec3<f32> = vec3(0.1f);
 @group(0) @binding(0) 
 var<uniform> res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX: CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX;
 @group(1) @binding(0) 
-var<uniform> res_node: Node;
+var<storage> res_instances: array<Instance>;
 
 @vertex 
-fn vs_scene(input: VertexInput) -> VertexOutput {
+fn vs_scene(@builtin(instance_index) instance_index: u32, input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
+    var instance: Instance;
 
-    let _e4 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.proj;
-    let _e7 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.view;
-    let _e12 = res_node.transform;
-    output.position = (((_e4 * _e7) * _e12) * vec4<f32>(input.position, 1f));
-    let _e21 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.view;
-    let _e24 = res_node.normal_transform;
-    output.normal = ((_e21 * _e24) * vec4<f32>(input.normal, 0f)).xyz;
-    let _e31 = output;
-    return _e31;
+    let _e3 = res_instances[instance_index];
+    instance = _e3;
+    let _e10 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_proj;
+    let _e12 = instance.local_to_world;
+    output.position = ((_e10 * _e12) * vec4<f32>(input.position, 1f));
+    let _e21 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
+    let _e23 = instance.normal_local_to_world;
+    output.normal = ((_e21 * _e23) * vec4<f32>(input.normal, 0f)).xyz;
+    let _e30 = output;
+    return _e30;
 }
 
 @fragment 
@@ -653,10 +663,12 @@ pub mod skybox {
     }
     pub const SHADER_STRING: &str = r#"
 struct CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX {
-    view: mat4x4<f32>,
-    view_inv: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    proj_inv: mat4x4<f32>,
+    world_to_local: mat4x4<f32>,
+    local_to_world: mat4x4<f32>,
+    local_to_proj: mat4x4<f32>,
+    proj_to_local: mat4x4<f32>,
+    world_to_proj: mat4x4<f32>,
+    proj_to_world: mat4x4<f32>,
 }
 
 struct SkyboxInterp {
@@ -679,9 +691,9 @@ fn vs_skybox(@builtin(vertex_index) vertex_index: u32) -> SkyboxInterp {
     let tmp2_ = (i32(vertex_index) & 1i);
     let pos = vec4<f32>(((f32(tmp1_) * 4f) - 1f), ((f32(tmp2_) * 4f) - 1f), 1f, 1f);
     result.position = pos;
-    let _e24 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.proj_inv;
+    let _e24 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.proj_to_local;
     let dir = vec4<f32>((_e24 * pos).xyz, 0f);
-    let _e32 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.view_inv;
+    let _e32 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.local_to_world;
     result.tex_coord = (_e32 * dir).xyz;
     let _e35 = result;
     return _e35;

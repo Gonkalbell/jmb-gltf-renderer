@@ -22,8 +22,8 @@ fn vs_skybox(@builtin(vertex_index) vertex_index: u32) -> SkyboxInterp {
 
     var result: SkyboxInterp;
     result.position = pos;
-    let dir = vec4<f32>((res_camera.proj_inv * pos).xyz, 0.0);
-    result.tex_coord = (res_camera.view_inv * dir).xyz;
+    let dir = vec4<f32>((res_camera.proj_to_local * pos).xyz, 0.0);
+    result.tex_coord = (res_camera.local_to_world * dir).xyz;
     return result;
 }
 

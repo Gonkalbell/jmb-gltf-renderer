@@ -1,13 +1,14 @@
-use crate::renderer::{OwnedBufferSlice, RenderBatch};
+use crate::renderer::{InstanceBindGroupEntries, InstanceBindGroupEntriesParams};
 
 use super::{
-    Asset, DEPTH_FORMAT, NodeBindGroup, NodeBindGroupEntries, NodeBindGroupEntriesParams,
-    Primitive, PrimitiveIndexData, scene,
+    Asset, DEPTH_FORMAT, InstanceBindGroup, OwnedBufferSlice, Primitive, PrimitiveIndexData,
+    RenderBatch, scene, shaders::scene::Instance,
 };
 use glam::{Mat3, Mat4, Quat, Vec3};
 use gltf::mesh::Mode;
 use reqwest::Url;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::str::FromStr;
 use wgpu::util::DeviceExt;
 
@@ -79,14 +80,17 @@ pub async fn load_asset(
 
     // Build Nodes
 
-    let mesh_instances = generate_nodes(device, &doc);
+    let (instance_bgroup, mesh_instances) = generate_nodes(device, &doc);
 
     // Build Meshes
 
     let batches = generate_meshes(device, &doc, color_format, &buffers, &mesh_instances);
 
     log::info!("finished loading {}", &url);
-    Ok(Asset { batches })
+    Ok(Asset {
+        batches,
+        instance_bgroup,
+    })
 }
 
 async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
@@ -102,7 +106,7 @@ struct MeshIndex(usize);
 fn generate_nodes(
     device: &wgpu::Device,
     doc: &gltf::Document,
-) -> HashMap<MeshIndex, Vec<NodeBindGroup>> {
+) -> (InstanceBindGroup, HashMap<MeshIndex, Range<u32>>) {
     // Get world transforms
     let mut nodes_to_visit = Vec::new();
     for doc_scene in doc.scenes() {
@@ -128,13 +132,10 @@ fn generate_nodes(
         });
 
     let center = (bbox_min + bbox_max) * 0.5;
-    let extent = (bbox_max - bbox_min) * 0.5;
+    let extent = bbox_max - bbox_min;
     let max_extent = extent.max_element();
-    let scale_factor = if max_extent > 0.0 {
-        1.0 / max_extent
-    } else {
-        1.0
-    };
+    let scale_factor = max_extent.recip();
+
     let inv_bounding_box_matrix = Mat4::from_scale_rotation_translation(
         Vec3::splat(scale_factor),
         Quat::IDENTITY,
@@ -145,33 +146,44 @@ fn generate_nodes(
         *transform = inv_bounding_box_matrix * *transform;
     }
 
-    let mut mesh_instances: HashMap<MeshIndex, Vec<NodeBindGroup>> = HashMap::new();
+    let mut mesh_instances: HashMap<MeshIndex, Vec<Instance>> = HashMap::new();
     for (doc_node, &transform) in doc.nodes().zip(world_transforms.iter()) {
         if let Some(doc_mesh) = doc_node.mesh() {
-            let node_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: doc_node.name(),
-                contents: bytemuck::bytes_of(&scene::Node {
-                    transform,
-                    normal_transform: Mat4::from_mat3(
-                        Mat3::from_mat4(transform).inverse().transpose(),
-                    ),
-                }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
-            let bgroup = NodeBindGroup::from_bindings(
-                device,
-                NodeBindGroupEntries::new(NodeBindGroupEntriesParams {
-                    res_node: node_buf.as_entire_buffer_binding(),
-                }),
-            );
             mesh_instances
                 .entry(MeshIndex(doc_mesh.index()))
                 .or_default()
-                .push(bgroup);
+                .push(Instance {
+                    local_to_world: transform,
+                    normal_local_to_world: Mat4::from_mat3(
+                        Mat3::from_mat4(transform).inverse().transpose(),
+                    ),
+                });
         }
     }
 
-    mesh_instances
+    let mut all_instance_data = Vec::new();
+    let mut mesh_instance_ranges: HashMap<MeshIndex, Range<u32>> = HashMap::new();
+    for (mesh_index, instances) in mesh_instances {
+        let start = all_instance_data.len() as u32;
+        all_instance_data.extend_from_slice(&instances);
+        let end = all_instance_data.len() as u32;
+        mesh_instance_ranges.insert(mesh_index, start..end);
+    }
+
+    let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Instances"),
+        contents: bytemuck::cast_slice(&all_instance_data),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
+    let instance_bgroup = InstanceBindGroup::from_bindings(
+        device,
+        InstanceBindGroupEntries::new(InstanceBindGroupEntriesParams {
+            res_instances: instance_buf.as_entire_buffer_binding(),
+        }),
+    );
+
+    (instance_bgroup, mesh_instance_ranges)
 }
 
 fn generate_meshes(
@@ -179,7 +191,7 @@ fn generate_meshes(
     doc: &gltf::Document,
     color_format: wgpu::TextureFormat,
     buffers: &[wgpu::Buffer],
-    mesh_instances: &HashMap<MeshIndex, Vec<NodeBindGroup>>,
+    mesh_instances: &HashMap<MeshIndex, Range<u32>>,
 ) -> Vec<RenderBatch> {
     let shader = scene::create_shader_module_embed_source(device);
     let mut batches = HashMap::new();
@@ -269,7 +281,7 @@ fn generate_meshes(
             let batch = batches.entry(key).or_insert_with_key(|key| {
                 create_render_batch(device, color_format, &shader, None, key)
             });
-            let nodes = mesh_instances
+            let instances = mesh_instances
                 .get(&MeshIndex(doc_mesh.index()))
                 .unwrap()
                 .clone();
@@ -278,7 +290,7 @@ fn generate_meshes(
                 attrib_buffers,
                 draw_count,
                 index_data,
-                nodes,
+                instances,
             });
         }
     }

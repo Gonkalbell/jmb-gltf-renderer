@@ -1,10 +1,10 @@
 #import bgroup_camera::res_camera
 
-struct Node {
-    transform: mat4x4f,
-    normal_transform: mat4x4f,
+struct Instance {
+    local_to_world: mat4x4f,
+    normal_local_to_world: mat4x4f,
 }
-@group(1) @binding(0) var<uniform> res_node : Node;
+@group(1) @binding(0) var<storage> res_instances : array<Instance>;
 
 struct VertexInput {
     @location(0) position: vec3f,
@@ -17,11 +17,11 @@ struct VertexOutput {
 };
 
 @vertex
-fn vs_scene(input: VertexInput) -> VertexOutput {
+fn vs_scene(@builtin(instance_index) instance_index: u32, input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
-
-    output.position = res_camera.proj * res_camera.view * res_node.transform * vec4f(input.position, 1);
-    output.normal = (res_camera.view * res_node.normal_transform * vec4f(input.normal, 0)).xyz;
+    var instance = res_instances[instance_index];
+    output.position = res_camera.world_to_proj * instance.local_to_world * vec4f(input.position, 1);
+    output.normal = (res_camera.world_to_local * instance.normal_local_to_world * vec4f(input.normal, 0)).xyz;
 
     return output;
 }

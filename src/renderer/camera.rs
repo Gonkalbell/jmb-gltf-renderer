@@ -4,6 +4,8 @@ use eframe::egui::{self, DragValue, Widget};
 use glam::{EulerRot, Mat4, Vec2, Vec3};
 use puffin::profile_function;
 
+use crate::renderer::shaders::bgroup_camera;
+
 /// A user-controlled camera that orbits around the origin.
 #[derive(Debug)]
 pub struct ArcBallCamera {
@@ -56,12 +58,13 @@ impl ArcBallCamera {
         }
 
         if input.pointer.secondary_down() {
-            let clip_to_world = (self.projection_matrix() * self.view_matrix()).inverse();
+            let proj_to_world =
+                self.local_to_world_matrix() * self.local_to_proj_matrix().inverse();
             // I'm multiplying the dist here to "undo" the division that normally gets applied to perspective projection
             // And I'm making it negative because I want it to feel like "dragging" the camera, so the scene should move
             // in the opposite direction of the pointer.
             let pointer_delta = (-self.dist * clipspace_pointer_delta).extend(0.).extend(0.);
-            let worldspace_pointer_delta = clip_to_world * pointer_delta;
+            let worldspace_pointer_delta = proj_to_world * pointer_delta;
             self.center_pos += worldspace_pointer_delta.truncate();
         }
 
@@ -106,8 +109,7 @@ impl ArcBallCamera {
         });
     }
 
-    /// Get the premultiplied view and projection matrices.
-    pub fn view_matrix(&self) -> Mat4 {
+    pub fn local_to_world_matrix(&self) -> Mat4 {
         let orbit = Mat4::from_translation(self.dist * Vec3::Z);
         let rot = Mat4::from_euler(
             EulerRot::YXZ,
@@ -116,10 +118,27 @@ impl ArcBallCamera {
             0.,
         );
         let translation = Mat4::from_translation(self.center_pos);
-        (translation * rot * orbit).inverse()
+        translation * rot * orbit
     }
 
-    pub fn projection_matrix(&self) -> Mat4 {
+    pub fn local_to_proj_matrix(&self) -> Mat4 {
         Mat4::perspective_rh(TAU * self.fov_y_revs, self.aspect_ratio, 0.1, 1000.)
+    }
+
+    pub fn get_buffer_data(&self) -> bgroup_camera::Camera {
+        let local_to_world = self.local_to_world_matrix();
+        let world_to_local = local_to_world.inverse();
+        let local_to_proj = self.local_to_proj_matrix();
+        let proj_to_local = local_to_proj.inverse();
+        let world_to_proj = local_to_proj * world_to_local;
+        let proj_to_world = local_to_world * proj_to_local;
+        bgroup_camera::Camera {
+            world_to_local,
+            local_to_world,
+            local_to_proj,
+            proj_to_local,
+            world_to_proj,
+            proj_to_world,
+        }
     }
 }

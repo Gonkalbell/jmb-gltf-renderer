@@ -4,10 +4,12 @@ mod gltf_loader;
 #[allow(clippy::all)]
 mod shaders;
 
-use std::ops::{Bound, RangeBounds};
+use std::ops::{Bound, Range, RangeBounds};
 
-use eframe::egui::{self, ahash::HashMap};
-use eframe::{egui_wgpu, wgpu};
+use eframe::{
+    egui::{self, ahash::HashMap},
+    egui_wgpu, wgpu,
+};
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
@@ -27,9 +29,9 @@ type CameraBindGroup = bgroup_camera::WgpuBindGroup0;
 type CameraBindGroupEntries<'a> = bgroup_camera::WgpuBindGroup0Entries<'a>;
 type CameraBindGroupEntriesParams<'a> = bgroup_camera::WgpuBindGroup0EntriesParams<'a>;
 
-type NodeBindGroup = scene::WgpuBindGroup1;
-type NodeBindGroupEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
-type NodeBindGroupEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
+type InstanceBindGroup = scene::WgpuBindGroup1;
+type InstanceBindGroupEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
+type InstanceBindGroupEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
 
 type SkyboxBindGroup = skybox::WgpuBindGroup1;
 type SkyboxBindGroupEntries<'a> = skybox::WgpuBindGroup1Entries<'a>;
@@ -52,6 +54,7 @@ pub struct SceneRenderer {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Asset {
     batches: Vec<RenderBatch>,
+    instance_bgroup: InstanceBindGroup,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,7 +68,7 @@ struct Primitive {
     attrib_buffers: Vec<OwnedBufferSlice>,
     draw_count: u32,
     index_data: Option<PrimitiveIndexData>,
-    nodes: Vec<NodeBindGroup>,
+    instances: Range<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,15 +117,11 @@ impl SceneRenderer {
         // Camera
 
         let user_camera = ArcBallCamera::default();
+        let camera_buffer_data = user_camera.get_buffer_data();
 
         let camera_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Uniform Buffer"),
-            contents: bytemuck::bytes_of(&bgroup_camera::Camera {
-                view: Default::default(),
-                view_inv: Default::default(),
-                proj: Default::default(),
-                proj_inv: Default::default(),
-            }),
+            contents: bytemuck::bytes_of(&camera_buffer_data),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -265,14 +264,7 @@ impl SceneRenderer {
     ) -> Option<wgpu::CommandBuffer> {
         profile_function!();
 
-        let view = self.user_camera.view_matrix();
-        let proj = self.user_camera.projection_matrix();
-        let camera = bgroup_camera::Camera {
-            view,
-            view_inv: view.inverse(),
-            proj,
-            proj_inv: proj.inverse(),
-        };
+        let camera = self.user_camera.get_buffer_data();
         queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
 
         None
@@ -284,6 +276,8 @@ impl SceneRenderer {
         self.camera_bgroup.set(rpass);
 
         if let Some(asset) = self.asset_rx.borrow().as_ref() {
+            asset.instance_bgroup.set(rpass);
+
             for batch in asset.batches.iter() {
                 rpass.set_pipeline(&batch.pipeline);
 
@@ -299,14 +293,10 @@ impl SceneRenderer {
                         );
                     }
 
-                    for node in primitive.nodes.iter() {
-                        node.set(rpass);
-
-                        if primitive.index_data.is_none() {
-                            rpass.draw(0..primitive.draw_count, 0..1);
-                        } else {
-                            rpass.draw_indexed(0..primitive.draw_count, 0, 0..1);
-                        }
+                    if primitive.index_data.is_none() {
+                        rpass.draw(0..primitive.draw_count, primitive.instances.clone());
+                    } else {
+                        rpass.draw_indexed(0..primitive.draw_count, 0, primitive.instances.clone());
                     }
                 }
             }
