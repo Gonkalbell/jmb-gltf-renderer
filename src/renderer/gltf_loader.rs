@@ -30,43 +30,45 @@ pub async fn load_asset(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
 ) -> anyhow::Result<Asset> {
-    let gltf_file = import_data(&url).await?;
+    let gltf_file = request_data(&url).await?;
     let gltf_file = gltf::Gltf::from_slice(&gltf_file)?;
-
     let doc = gltf_file.document;
-    let mut blob = gltf_file.blob.unwrap_or_default();
-    blob.resize(4 * blob.len().div_ceil(4), 0);
-    let buffers = futures::future::try_join_all(doc.buffers().map(|doc_buffer| {
-        let blob = blob.clone();
-        let base = url.clone();
-        async move {
-            let source = doc_buffer.source();
-            let contents = match source {
-                gltf::buffer::Source::Bin => {
-                    // TODO: make this a COW to avoid cloning?
-                    blob
-                }
-                gltf::buffer::Source::Uri(uri) => {
-                    let url = Url::from_str(uri)
-                        .or_else(|_| base.join(uri))
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to parse buffer URI '{}': {}", uri, e)
-                        })?;
-                    import_data(&url).await?
-                }
-            };
-            Ok::<_, anyhow::Error>(
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: doc_buffer.name(),
-                    contents: &contents,
-                    usage: wgpu::BufferUsages::COPY_DST
-                        | wgpu::BufferUsages::VERTEX
-                        | wgpu::BufferUsages::INDEX,
-                }),
-            )
+    let mut blob = gltf_file.blob;
+
+    let mut buffer_contents = Vec::new();
+    for doc_buffer in doc.buffers() {
+        use gltf::buffer::{Data, Source};
+
+        // Handle remote urls ourselves, but let the gltf crate handle other sources.
+        let url_is_remote = url.port_or_known_default().is_some();
+        if url_is_remote
+            && let Source::Uri(doc_uri) = doc_buffer.source()
+            && Url::from_str(doc_uri).is_err()
+            && let Ok(full_url) = url.join(doc_uri)
+        {
+            let data = request_data(&full_url).await.map(Data)?;
+            buffer_contents.push(data);
+        } else {
+            let base_path = url.to_file_path().ok();
+            let data =
+                Data::from_source_and_blob(doc_buffer.source(), base_path.as_deref(), &mut blob)?;
+            buffer_contents.push(data);
         }
-    }))
-    .await?;
+    }
+
+    let buffers: Vec<_> = doc
+        .buffers()
+        .zip(buffer_contents.iter())
+        .map(|(doc_buffer, contents)| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: doc_buffer.name(),
+                contents,
+                usage: wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::INDEX,
+            })
+        })
+        .collect();
 
     let buffer_slices: Vec<_> = doc
         .views()
@@ -107,7 +109,7 @@ pub async fn load_asset(
     })
 }
 
-async fn import_data(url: &Url) -> anyhow::Result<Vec<u8>> {
+async fn request_data(url: &Url) -> anyhow::Result<Vec<u8>> {
     log::info!("requesting {}", &url);
     let data = reqwest::get(url.clone()).await?.bytes().await?.to_vec();
     log::info!("received {}", &url);
