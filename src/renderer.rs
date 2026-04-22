@@ -4,11 +4,10 @@ mod gltf_loader;
 #[allow(clippy::all)]
 mod shaders;
 
-use std::ops::{Bound, Range, RangeBounds};
+use std::ops::Range;
 
-use eframe::egui::RichText;
 use eframe::{
-    egui::{self, ahash::HashMap},
+    egui::{self, RichText, ahash::HashMap},
     egui_wgpu, wgpu,
 };
 use puffin::profile_function;
@@ -82,21 +81,22 @@ struct PrimitiveIndexData {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OwnedBufferSlice {
     buffer: wgpu::Buffer,
-    start: Bound<wgpu::BufferAddress>,
-    end: Bound<wgpu::BufferAddress>,
+    offset: wgpu::BufferAddress,
+    size: wgpu::BufferSize,
 }
 
 impl OwnedBufferSlice {
-    fn new(buffer: wgpu::Buffer, bounds: impl RangeBounds<wgpu::BufferAddress>) -> Self {
+    fn from_slice(slice: &wgpu::BufferSlice) -> Self {
         Self {
-            buffer,
-            start: bounds.start_bound().cloned(),
-            end: bounds.end_bound().cloned(),
+            buffer: slice.buffer().clone(),
+            offset: slice.offset(),
+            size: slice.size(),
         }
     }
 
     fn as_slice<'a>(&'a self) -> wgpu::BufferSlice<'a> {
-        self.buffer.slice((self.start, self.end))
+        self.buffer
+            .slice(self.offset..self.offset + self.size.get())
     }
 }
 
@@ -402,7 +402,7 @@ impl SceneRenderer {
                     ui.menu_button(format!("block {}: {}", i, block.size), |ui| {
                         let mut sorted_allocations =
                             report.allocations[block.allocations.clone()].to_owned();
-                        sorted_allocations.sort_by(|a, b| a.offset.cmp(&b.offset));
+                        sorted_allocations.sort_by_key(|a| a.offset);
                         for allocation in sorted_allocations.iter() {
                             ui.label(
                                 RichText::new(format!(

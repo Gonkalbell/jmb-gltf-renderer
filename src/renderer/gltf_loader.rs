@@ -36,12 +36,12 @@ pub async fn load_asset(
     let doc = gltf_file.document;
     let mut blob = gltf_file.blob.unwrap_or_default();
     blob.resize(4 * blob.len().div_ceil(4), 0);
-    let buffer_data = futures::future::try_join_all(doc.buffers().map(|buffer| {
+    let buffers = futures::future::try_join_all(doc.buffers().map(|doc_buffer| {
         let blob = blob.clone();
         let base = url.clone();
         async move {
-            let source = buffer.source();
-            let data = match source {
+            let source = doc_buffer.source();
+            let contents = match source {
                 gltf::buffer::Source::Bin => {
                     // TODO: make this a COW to avoid cloning?
                     blob
@@ -55,27 +55,26 @@ pub async fn load_asset(
                     import_data(&url).await?
                 }
             };
-            Ok::<_, anyhow::Error>(gltf::buffer::Data(data))
+            Ok::<_, anyhow::Error>(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: doc_buffer.name(),
+                    contents: &contents,
+                    usage: wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::INDEX,
+                }),
+            )
         }
     }))
     .await?;
 
-    let buffers: Vec<_> = doc
+    let buffer_slices: Vec<_> = doc
         .views()
         .map(|doc_view: gltf::buffer::View| {
-            let data = &buffer_data[doc_view.buffer().index()];
-            let contents = &data[doc_view.offset()..doc_view.offset() + doc_view.length()];
-            let target_flags = match doc_view.target() {
-                Some(gltf::buffer::Target::ArrayBuffer) => wgpu::BufferUsages::VERTEX,
-                Some(gltf::buffer::Target::ElementArrayBuffer) => wgpu::BufferUsages::INDEX,
-                None => wgpu::BufferUsages::empty(),
-            };
-            let usage = wgpu::BufferUsages::COPY_DST | target_flags;
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: doc_view.name(),
-                contents,
-                usage,
-            })
+            buffers[doc_view.buffer().index()].slice(
+                doc_view.offset() as wgpu::BufferAddress
+                    ..(doc_view.offset() + doc_view.length()) as wgpu::BufferAddress,
+            )
         })
         .collect();
 
@@ -85,7 +84,7 @@ pub async fn load_asset(
 
     // Build Meshes
 
-    let batches = generate_meshes(device, &doc, color_format, &buffers, &mesh_instances);
+    let batches = generate_meshes(device, &doc, color_format, &buffer_slices, &mesh_instances);
 
     let mut asset_info = String::new();
     let json_asset = &doc.as_json().asset;
@@ -205,7 +204,7 @@ fn generate_meshes(
     device: &wgpu::Device,
     doc: &gltf::Document,
     color_format: wgpu::TextureFormat,
-    buffers: &[wgpu::Buffer],
+    buffer_slices: &[wgpu::BufferSlice],
     mesh_instances: &HashMap<MeshIndex, Range<u32>>,
 ) -> Vec<RenderBatch> {
     let shader = scene::create_shader_module_embed_source(device);
@@ -253,7 +252,9 @@ fn generate_meshes(
                                 shader_location,
                             },
                         },
-                        OwnedBufferSlice::new(buffers[buffer_view.index()].clone(), buf_offset..),
+                        OwnedBufferSlice::from_slice(
+                            &buffer_slices[buffer_view.index()].slice(buf_offset..),
+                        ),
                     ))
                 })
                 .unzip();
@@ -281,9 +282,9 @@ fn generate_meshes(
                 use gltf::accessor::DataType;
                 draw_count = indices.count() as _;
                 PrimitiveIndexData {
-                    buffer_slice: OwnedBufferSlice::new(
-                        buffers[indices.view().unwrap().index()].clone(),
-                        (indices.offset() as wgpu::BufferAddress)..,
+                    buffer_slice: OwnedBufferSlice::from_slice(
+                        &buffer_slices[indices.view().unwrap().index()]
+                            .slice(indices.offset() as wgpu::BufferAddress..),
                     ),
                     format: match indices.data_type() {
                         DataType::U16 => wgpu::IndexFormat::Uint16,
