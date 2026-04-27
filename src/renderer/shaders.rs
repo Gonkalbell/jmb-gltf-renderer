@@ -2,7 +2,7 @@
 //
 // ^ wgsl_bindgen version 0.22.2
 // Changes made to this file will not be saved.
-// SourceHash: c15e7df322e3006473f13953f2719fae7e1d677d92152ab72d0a3641dabc113f
+// SourceHash: 823e1b9aeb9e5a77dfbece9adf03c77b4787b58fa75114243629b8322e8d6a42
 
 #![allow(unused, non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -233,14 +233,35 @@ pub mod scene {
     pub struct VertexInput {
         pub position: glam::Vec3,
         pub normal: glam::Vec3,
+        pub tangent: glam::Vec4,
+        pub texcoord_0: glam::Vec2,
+        pub texcoord_1: glam::Vec2,
+        pub color_0: glam::Vec4,
+        pub color_1: glam::Vec4,
     }
     impl VertexInput {
-        pub const fn new(position: glam::Vec3, normal: glam::Vec3) -> Self {
-            Self { position, normal }
+        pub const fn new(
+            position: glam::Vec3,
+            normal: glam::Vec3,
+            tangent: glam::Vec4,
+            texcoord_0: glam::Vec2,
+            texcoord_1: glam::Vec2,
+            color_0: glam::Vec4,
+            color_1: glam::Vec4,
+        ) -> Self {
+            Self {
+                position,
+                normal,
+                tangent,
+                texcoord_0,
+                texcoord_1,
+                color_0,
+                color_1,
+            }
         }
     }
     impl VertexInput {
-        pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+        pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 7] = [
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x3,
                 offset: std::mem::offset_of!(Self, position) as u64,
@@ -250,6 +271,31 @@ pub mod scene {
                 format: wgpu::VertexFormat::Float32x3,
                 offset: std::mem::offset_of!(Self, normal) as u64,
                 shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: std::mem::offset_of!(Self, tangent) as u64,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: std::mem::offset_of!(Self, texcoord_0) as u64,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: std::mem::offset_of!(Self, texcoord_1) as u64,
+                shader_location: 4,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: std::mem::offset_of!(Self, color_0) as u64,
+                shader_location: 5,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: std::mem::offset_of!(Self, color_1) as u64,
+                shader_location: 6,
             },
         ];
         pub const fn vertex_buffer_layout(
@@ -442,11 +488,17 @@ struct Instance {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) tangent: vec4<f32>,
+    @location(3) texcoord_0_: vec2<f32>,
+    @location(4) texcoord_1_: vec2<f32>,
+    @location(5) color_0_: vec4<f32>,
+    @location(6) color_1_: vec4<f32>,
 }
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
-    @location(0) normal: vec3<f32>,
+    @location(0) view_position: vec4<f32>,
+    @location(1) normal: vec3<f32>,
 }
 
 const LIGHT_DIR: vec3<f32> = vec3<f32>(0.25f, 0.5f, 1f);
@@ -470,17 +522,33 @@ fn vs_scene(@builtin(instance_index) instance_index: u32, input: VertexInput) ->
     let _e21 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
     let _e23 = instance.normal_local_to_world;
     output.normal = ((_e21 * _e23) * vec4<f32>(input.normal, 0f)).xyz;
-    let _e30 = output;
-    return _e30;
+    let _e33 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
+    let _e35 = instance.local_to_world;
+    output.view_position = ((_e33 * _e35) * vec4<f32>(input.position, 1f));
+    let _e41 = output;
+    return _e41;
 }
 
 @fragment 
 fn fs_scene(input_1: VertexOutput) -> @location(0) vec4<f32> {
-    let N = normalize(input_1.normal);
+    var N: vec3<f32>;
+
+    N = input_1.normal;
+    let _e3 = N;
+    if all((_e3 == vec3(0f))) {
+        let view_position = input_1.view_position.xyz;
+        let dx = dpdx(view_position);
+        let dy = dpdy(view_position);
+        N = cross(dy, dx);
+    }
+    let _e13 = N;
+    N = normalize(_e13);
     let L = vec3<f32>(0.21821788f, 0.43643576f, 0.8728715f);
-    let NDotL = max(dot(N, L), 0f);
+    let _e19 = N;
+    let NDotL = max(dot(_e19, L), 0f);
     let surface_color = (AMBIENT_COLOR + vec3(NDotL));
-    return vec4<f32>(((vec3(1f) + N) / vec3(2f)), 1f);
+    let _e27 = N;
+    return vec4<f32>(((vec3(1f) + _e27) / vec3(2f)), 1f);
 }
 "#;
 }

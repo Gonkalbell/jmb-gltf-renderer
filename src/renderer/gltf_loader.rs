@@ -1,27 +1,26 @@
-use crate::renderer::{InstanceBindGroupEntries, InstanceBindGroupEntriesParams};
+use crate::renderer::{
+    InstanceBindGroupEntries, InstanceBindGroupEntriesParams, shaders::scene::VertexInput,
+};
 
 use super::{
     Asset, DEPTH_FORMAT, InstanceBindGroup, OwnedBufferSlice, Primitive, PrimitiveIndexData,
     RenderBatch, scene, shaders::scene::Instance,
 };
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use gltf::mesh::Mode;
 use reqwest::Url;
-use std::collections::HashMap;
-use std::fmt::Write;
-use std::ops::Range;
-use std::str::FromStr;
+use std::{collections::HashMap, fmt::Write, ops::Range, str::FromStr};
 use wgpu::util::DeviceExt;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct AttributeInfo {
-    array_stride: u64,
+struct OwnedVertexBufferLayout {
+    array_stride: wgpu::BufferAddress,
     attribute: wgpu::VertexAttribute,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct PipelineCacheKey {
-    attributes: Vec<AttributeInfo>,
+    attributes: Vec<OwnedVertexBufferLayout>,
     primitive_state: wgpu::PrimitiveState,
 }
 
@@ -212,6 +211,45 @@ fn generate_meshes(
     let shader = scene::create_shader_module_embed_source(device);
     let mut batches = HashMap::new();
 
+    let default_vertex_input = VertexInput {
+        position: Default::default(),
+        normal: Vec3::ZERO,
+        tangent: Vec4::ZERO,
+        texcoord_0: Default::default(),
+        texcoord_1: Default::default(),
+        color_0: Vec4::ONE,
+        color_1: Vec4::ONE,
+    };
+    let default_vertex_buf: wgpu::Buffer =
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Default Vertex Input"),
+            contents: bytemuck::bytes_of(&default_vertex_input),
+            usage: wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::VERTEX
+                | wgpu::BufferUsages::INDEX,
+        });
+    let default_buf_and_layout_iter = VertexInput::VERTEX_ATTRIBUTES.into_iter().map(|attrib| {
+        (
+            OwnedBufferSlice::from_slice(&default_vertex_buf.slice(..)),
+            OwnedVertexBufferLayout {
+                array_stride: 0,
+                attribute: attrib,
+            },
+        )
+    });
+    let semantics = [
+        gltf::Semantic::Positions,
+        gltf::Semantic::Normals,
+        gltf::Semantic::Tangents,
+        gltf::Semantic::TexCoords(0),
+        gltf::Semantic::TexCoords(1),
+        gltf::Semantic::Colors(0),
+        gltf::Semantic::Colors(1),
+    ];
+
+    let default_attributes: HashMap<gltf::Semantic, (OwnedBufferSlice, OwnedVertexBufferLayout)> =
+        HashMap::from_iter(semantics.into_iter().zip(default_buf_and_layout_iter));
+
     for doc_mesh in doc.meshes() {
         for doc_primitive in doc_mesh.primitives() {
             let vertex_count = doc_primitive
@@ -220,46 +258,48 @@ fn generate_meshes(
                 .expect("There should be at least one attribute for each primitive")
                 .1
                 .count();
-            let (attrib_layouts, attrib_buffers): (Vec<_>, Vec<_>) = doc_primitive
-                .attributes()
-                .filter_map(|(semantic, accessor)| {
-                    let shader_location = match semantic {
-                        gltf::Semantic::Positions => 0,
-                        gltf::Semantic::Normals => 1,
-                        _ => return None,
-                    };
 
-                    let buffer_view = accessor.view().expect("Accessor should have a buffer view");
-                    let format = get_vertex_format(&accessor);
-                    let stride = buffer_view
-                        .stride()
-                        .map(|s| s as u64)
-                        .unwrap_or(format.size());
-                    let (buf_offset, attrib_offset) = if accessor.offset() >= stride as _
-                        || stride > device.limits().max_vertex_buffer_array_stride as _
-                    {
-                        (
-                            accessor.offset() as wgpu::BufferAddress,
-                            0 as wgpu::BufferAddress,
-                        )
+            let mut attributes = default_attributes.clone();
+            for (semantic, accessor) in doc_primitive.attributes() {
+                let shader_location =
+                    if let Some((_, attrib_layout)) = default_attributes.get(&semantic) {
+                        attrib_layout.attribute.shader_location
                     } else {
-                        (0 as _, accessor.offset() as wgpu::BufferAddress)
+                        continue;
                     };
-                    Some((
-                        AttributeInfo {
-                            array_stride: stride,
-                            attribute: wgpu::VertexAttribute {
-                                format,
-                                offset: attrib_offset as _,
-                                shader_location,
-                            },
-                        },
-                        OwnedBufferSlice::from_slice(
-                            &buffer_slices[buffer_view.index()].slice(buf_offset..),
-                        ),
-                    ))
-                })
-                .unzip();
+                let view = accessor.view().unwrap();
+                let format = get_vertex_format(&accessor);
+                let accessor_end = accessor.offset() as wgpu::BufferAddress + format.size();
+                let array_stride = view.stride().map(|s| s as _).unwrap_or(format.size());
+                let buf_slice = buffer_slices[view.index()];
+
+                let (offset, buf_slice) = if accessor_end <= array_stride {
+                    (accessor.offset() as _, buf_slice)
+                } else {
+                    // While normally I can have one wgpu::BufferSlice per gltf::View, some assets use accessors to
+                    // essentially act as a new view rather than an offset into a "stride" sized block. So for these
+                    // cases, I need to treat these accessors as if they have a completely new wgpu::BufferSlice
+                    (
+                        0,
+                        buf_slice.slice(accessor.offset() as wgpu::BufferAddress..),
+                    )
+                };
+
+                let owned_slice = OwnedBufferSlice::from_slice(&buf_slice);
+                let owned_layout = OwnedVertexBufferLayout {
+                    array_stride,
+                    attribute: wgpu::VertexAttribute {
+                        format,
+                        offset,
+                        shader_location,
+                    },
+                };
+
+                attributes.insert(semantic, (owned_slice, owned_layout));
+            }
+
+            let (attrib_buffers, attrib_layouts): (Vec<_>, Vec<_>) =
+                attributes.into_values().unzip();
 
             let primitive_state = wgpu::PrimitiveState {
                 topology: match doc_primitive.mode() {
@@ -327,7 +367,7 @@ fn create_render_batch(
         .attributes
         .iter()
         .map(
-            |AttributeInfo {
+            |OwnedVertexBufferLayout {
                  array_stride,
                  attribute,
              }| wgpu::VertexBufferLayout {
