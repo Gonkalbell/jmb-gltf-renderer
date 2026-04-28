@@ -48,6 +48,9 @@ pub async fn load_asset(
             let data = request_data(&full_url).await.map(Data)?;
             buffer_contents.push(data);
         } else {
+            #[cfg(target_family = "wasm")]
+            let base_path: Option<std::path::PathBuf> = None;
+            #[cfg(not(target_family = "wasm"))]
             let base_path = url.to_file_path().ok();
             let data =
                 Data::from_source_and_blob(doc_buffer.source(), base_path.as_deref(), &mut blob)?;
