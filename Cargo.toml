@@ -16,11 +16,11 @@ eframe = { version = "0.34", default-features = false, features = ["default_font
 futures = "0.3"
 glam = { version = "0.32", features = ["bytemuck", "serde"] }
 gltf = { version = "1.4", features = ["KHR_lights_punctual", "extensions", "extras", "guess_mime_type"] }
+image = "0.25.10"
 ktx2 = "0.5"
 log = "0.4"
 puffin = { version = "0.20", features = ["web"] }
 puffin_http = "0.17"
-puffin_egui = "0.30"
 reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

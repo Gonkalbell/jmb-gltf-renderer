@@ -8,6 +8,7 @@ use super::{
 };
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use gltf::mesh::Mode;
+use image::{DynamicImage, ImageFormat};
 use reqwest::Url;
 use std::{collections::HashMap, fmt::Write, ops::Range, str::FromStr};
 use wgpu::util::DeviceExt;
@@ -27,6 +28,7 @@ struct PipelineCacheKey {
 pub async fn load_asset(
     url: Url,
     device: &wgpu::Device,
+    queue: &wgpu::Queue,
     color_format: wgpu::TextureFormat,
 ) -> anyhow::Result<Asset> {
     let gltf_file = request_data(&url).await?;
@@ -82,6 +84,91 @@ pub async fn load_asset(
         })
         .collect();
 
+    let mut textures = Vec::new();
+    for doc_image in doc.images() {
+        use gltf::image::{Data, Source};
+
+        // Handle remote urls ourselves, but let the gltf crate handle other sources.
+        let url_is_remote = url.port_or_known_default().is_some();
+        let dynamic_image = if url_is_remote
+            && let Source::Uri { uri, mime_type } = doc_image.source()
+            && Url::from_str(uri).is_err()
+            && let Ok(full_url) = url.join(uri)
+        {
+            let encoded_image = request_data(&full_url).await?;
+
+            let encoded_format = match mime_type {
+                Some("image/png") => ImageFormat::Png,
+                Some("image/jpeg") => ImageFormat::Jpeg,
+                _ => match image::guess_format(&encoded_image) {
+                    Ok(format) => format,
+                    Err(e) => return Err(anyhow::anyhow!("Unsupported format {}", e)),
+                },
+            };
+
+            image::load_from_memory_with_format(&encoded_image, encoded_format)?
+        } else {
+            #[cfg(target_family = "wasm")]
+            let base_path: Option<std::path::PathBuf> = None;
+            #[cfg(not(target_family = "wasm"))]
+            let base_path = url.to_file_path().ok();
+            let data =
+                Data::from_source(doc_image.source(), base_path.as_deref(), &buffer_contents)?;
+
+            image_data_to_dynamic_image(data)?
+        };
+        let texture = dynamic_image_to_texture(device, queue, doc_image.name(), dynamic_image)?;
+        textures.push(texture);
+    }
+
+    let samplers: Vec<_> = doc
+        .samplers()
+        .map(|doc_sampler| {
+            use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: doc_sampler.name(),
+                address_mode_u: match doc_sampler.wrap_s() {
+                    WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+                    WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
+                    WrappingMode::Repeat => wgpu::AddressMode::Repeat,
+                },
+                address_mode_v: match doc_sampler.wrap_s() {
+                    WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+                    WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
+                    WrappingMode::Repeat => wgpu::AddressMode::Repeat,
+                },
+                mag_filter: match doc_sampler.mag_filter() {
+                    Some(MagFilter::Nearest) => wgpu::FilterMode::Nearest,
+                    Some(MagFilter::Linear) | None => wgpu::FilterMode::Linear,
+                },
+                min_filter: match doc_sampler.min_filter() {
+                    Some(
+                        MinFilter::Nearest
+                        | MinFilter::NearestMipmapLinear
+                        | MinFilter::NearestMipmapNearest,
+                    ) => wgpu::FilterMode::Nearest,
+                    None
+                    | Some(
+                        MinFilter::Linear
+                        | MinFilter::LinearMipmapLinear
+                        | MinFilter::LinearMipmapNearest,
+                    ) => wgpu::FilterMode::Linear,
+                },
+                mipmap_filter: match doc_sampler.min_filter() {
+                    Some(
+                        MinFilter::Nearest
+                        | MinFilter::LinearMipmapNearest
+                        | MinFilter::NearestMipmapNearest,
+                    ) => wgpu::MipmapFilterMode::Nearest,
+                    _ => wgpu::MipmapFilterMode::Linear,
+                },
+                ..Default::default()
+            })
+        })
+        .collect();
+    let _ = samplers;
+
     // Build Nodes
 
     let (instance_bgroup, mesh_instances) = generate_nodes(device, &doc);
@@ -109,6 +196,81 @@ pub async fn load_asset(
         batches,
         instance_bgroup,
     })
+}
+
+fn image_data_to_dynamic_image(data: gltf::image::Data) -> Result<DynamicImage, anyhow::Error> {
+    use gltf::image::Format;
+
+    let w = data.width;
+    let h = data.height;
+    let p = data.pixels;
+    let dynamic_image =
+        match &data.format {
+            Format::R8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageLuma8),
+            Format::R8G8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageLumaA8),
+            Format::R8G8B8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageRgb8),
+            Format::R8G8B8A8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageRgba8),
+            Format::R16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
+                .map(DynamicImage::ImageLuma16),
+            Format::R16G16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
+                .map(DynamicImage::ImageLumaA16),
+            Format::R16G16B16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
+                .map(DynamicImage::ImageRgb16),
+            Format::R16G16B16A16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
+                .map(DynamicImage::ImageRgba16),
+            Format::R32G32B32FLOAT => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
+                .map(DynamicImage::ImageRgb32F),
+            Format::R32G32B32A32FLOAT => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
+                .map(DynamicImage::ImageRgba32F),
+        };
+    dynamic_image.ok_or_else(|| anyhow::anyhow!("Could not convert image back into DynamicImage"))
+}
+
+fn dynamic_image_to_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: Option<&str>,
+    dynamic_image: image::DynamicImage,
+) -> anyhow::Result<wgpu::Texture> {
+    let dynamic_image = match &dynamic_image {
+        DynamicImage::ImageRgb8(_) => DynamicImage::ImageRgba8(dynamic_image.to_rgba8()),
+        DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgba16(dynamic_image.to_rgba16()),
+        DynamicImage::ImageRgba32F(_) => DynamicImage::ImageRgba32F(dynamic_image.to_rgba32f()),
+        _ => dynamic_image
+    };
+    let format = match &dynamic_image {
+        DynamicImage::ImageLuma8(_) => wgpu::TextureFormat::R8Unorm,
+        DynamicImage::ImageLumaA8(_) => wgpu::TextureFormat::Rg8Unorm,
+        DynamicImage::ImageRgba8(_) => wgpu::TextureFormat::Rgba8Unorm,
+        DynamicImage::ImageLuma16(_) => wgpu::TextureFormat::R16Unorm,
+        DynamicImage::ImageLumaA16(_) => wgpu::TextureFormat::Rg16Unorm,
+        DynamicImage::ImageRgba16(_) => wgpu::TextureFormat::Rgba16Unorm,
+        DynamicImage::ImageRgb32F(_) => wgpu::TextureFormat::Rgba32Float,
+        other_format => {
+            return Err(anyhow::anyhow!("Unsupported format {:?}", other_format));
+        }
+    };
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label,
+            size: wgpu::Extent3d {
+                width: dynamic_image.width(),
+                height: dynamic_image.height(),
+                ..Default::default()
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
+        },
+        Default::default(),
+        dynamic_image.as_bytes(),
+    );
+
+    Ok(texture)
 }
 
 async fn request_data(url: &Url) -> anyhow::Result<Vec<u8>> {

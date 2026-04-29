@@ -215,12 +215,13 @@ impl SceneRenderer {
         let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
         let asset_tx_clone = asset_tx.clone();
         let device = device.clone();
+        let queue = queue.clone();
         crate::spawn(async move {
             let url = Url::parse(ASSETS_BASE_URL)
                 .unwrap()
                 .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
                 .unwrap();
-            let loaded_scene = gltf_loader::load_asset(url, &device, color_format)
+            let loaded_scene = gltf_loader::load_asset(url, &device, &queue, color_format)
                 .await
                 .unwrap();
             let _ = asset_tx_clone.send(Some(loaded_scene));
@@ -322,7 +323,7 @@ impl SceneRenderer {
         egui::Panel::top("top_panel").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Asset", |ui| {
-                    self.show_scene_menu(&render_state.device, render_state.target_format, ui);
+                    self.show_scene_menu(&render_state, ui);
                 });
 
                 ui.menu_button("Camera", |ui| self.user_camera.run_ui(ui));
@@ -428,12 +429,7 @@ impl SceneRenderer {
         }
     }
 
-    fn show_scene_menu(
-        &mut self,
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-        ui: &mut egui::Ui,
-    ) {
+    fn show_scene_menu(&mut self, render_state: &egui_wgpu::RenderState, ui: &mut egui::Ui) {
         let model_list = self.asset_list.borrow();
         if !model_list.is_empty() {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -442,15 +438,21 @@ impl SceneRenderer {
                         for (variant, file) in &model.variants {
                             if ui.button(variant).clicked() {
                                 let asset_tx = self.asset_tx.clone();
-                                let device = device.clone();
+                                let egui_wgpu::RenderState {
+                                    device,
+                                    queue,
+                                    target_format,
+                                    ..
+                                } = render_state.clone();
                                 let url = Url::parse(ASSETS_BASE_URL)
                                     .unwrap()
                                     .join(&format!("{}/{}/{}", &model.name, variant, file))
                                     .unwrap();
                                 crate::spawn(async move {
-                                    let scene = gltf_loader::load_asset(url, &device, color_format)
-                                        .await
-                                        .unwrap();
+                                    let scene =
+                                        gltf_loader::load_asset(url, &device, &queue, target_format)
+                                            .await
+                                            .unwrap();
                                     let _ = asset_tx.send(Some(scene));
                                 });
                             }
