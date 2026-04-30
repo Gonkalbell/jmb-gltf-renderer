@@ -12,6 +12,7 @@ use image::{DynamicImage, ImageFormat};
 use reqwest::Url;
 use std::{collections::HashMap, fmt::Write, ops::Range, str::FromStr};
 use wgpu::util::DeviceExt;
+use wgpu::wgt::TextureViewDescriptor;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct OwnedVertexBufferLayout {
@@ -236,7 +237,7 @@ fn dynamic_image_to_texture(
         DynamicImage::ImageRgb8(_) => DynamicImage::ImageRgba8(dynamic_image.to_rgba8()),
         DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgba16(dynamic_image.to_rgba16()),
         DynamicImage::ImageRgba32F(_) => DynamicImage::ImageRgba32F(dynamic_image.to_rgba32f()),
-        _ => dynamic_image
+        _ => dynamic_image,
     };
     let format = match &dynamic_image {
         DynamicImage::ImageLuma8(_) => wgpu::TextureFormat::R8Unorm,
@@ -250,25 +251,65 @@ fn dynamic_image_to_texture(
             return Err(anyhow::anyhow!("Unsupported format {:?}", other_format));
         }
     };
-    let texture = device.create_texture_with_data(
-        queue,
-        &wgpu::TextureDescriptor {
-            label,
-            size: wgpu::Extent3d {
-                width: dynamic_image.width(),
-                height: dynamic_image.height(),
-                ..Default::default()
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
+    let size = wgpu::Extent3d {
+        width: dynamic_image.width(),
+        height: dynamic_image.height(),
+        ..Default::default()
+    };
+    let mip_level_count = size.width.min(size.height).ilog2().max(1);
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label,
+        size,
+        mip_level_count,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
+    });
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfoBase {
+            texture: &texture,
+            mip_level: 0,
+            origin: Default::default(),
+            aspect: Default::default(),
         },
-        Default::default(),
         dynamic_image.as_bytes(),
+        wgpu::TexelCopyBufferLayout {
+            offset: Default::default(),
+            bytes_per_row: format.block_copy_size(None).map(|b| b * size.width),
+            rows_per_image: Default::default(),
+        },
+        size,
     );
+
+    let blitter = wgpu::util::TextureBlitterBuilder::new(device, format)
+        .sample_type(wgpu::FilterMode::Linear)
+        .build();
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Blit"),
+    });
+    for base_mip_level in 1..mip_level_count {
+        blitter.copy(
+            device,
+            &mut encoder,
+            &texture.create_view(&TextureViewDescriptor {
+                base_mip_level: base_mip_level - 1,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }),
+            &texture.create_view(&TextureViewDescriptor {
+                base_mip_level,
+                mip_level_count: Some(1),
+                ..Default::default()
+            }),
+        );
+    }
+    queue.submit([encoder.finish()]);
 
     Ok(texture)
 }
