@@ -85,42 +85,7 @@ pub async fn load_asset(
         })
         .collect();
 
-    let mut textures = Vec::new();
-    for doc_image in doc.images() {
-        use gltf::image::{Data, Source};
-
-        // Handle remote urls ourselves, but let the gltf crate handle other sources.
-        let url_is_remote = url.port_or_known_default().is_some();
-        let dynamic_image = if url_is_remote
-            && let Source::Uri { uri, mime_type } = doc_image.source()
-            && Url::from_str(uri).is_err()
-            && let Ok(full_url) = url.join(uri)
-        {
-            let encoded_image = request_data(&full_url).await?;
-
-            let encoded_format = match mime_type {
-                Some("image/png") => ImageFormat::Png,
-                Some("image/jpeg") => ImageFormat::Jpeg,
-                _ => match image::guess_format(&encoded_image) {
-                    Ok(format) => format,
-                    Err(e) => return Err(anyhow::anyhow!("Unsupported format {}", e)),
-                },
-            };
-
-            image::load_from_memory_with_format(&encoded_image, encoded_format)?
-        } else {
-            #[cfg(target_family = "wasm")]
-            let base_path: Option<std::path::PathBuf> = None;
-            #[cfg(not(target_family = "wasm"))]
-            let base_path = url.to_file_path().ok();
-            let data =
-                Data::from_source(doc_image.source(), base_path.as_deref(), &buffer_contents)?;
-
-            image_data_to_dynamic_image(data)?
-        };
-        let texture = dynamic_image_to_texture(device, queue, doc_image.name(), dynamic_image)?;
-        textures.push(texture);
-    }
+    let _textures = import_textures(&url, device, queue, &doc, buffer_contents).await?;
 
     let samplers: Vec<_> = doc
         .samplers()
@@ -170,11 +135,7 @@ pub async fn load_asset(
         .collect();
     let _ = samplers;
 
-    // Build Nodes
-
     let (instance_bgroup, mesh_instances) = generate_nodes(device, &doc);
-
-    // Build Meshes
 
     let batches = generate_meshes(device, &doc, color_format, &buffer_slices, &mesh_instances);
 
@@ -197,6 +158,129 @@ pub async fn load_asset(
         batches,
         instance_bgroup,
     })
+}
+
+async fn import_textures(
+    base_url: &Url,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    doc: &gltf::Document,
+    buffer_contents: Vec<gltf::buffer::Data>,
+) -> Result<Vec<wgpu::Texture>, anyhow::Error> {
+    let mut textures = Vec::new();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Blit"),
+    });
+    for doc_image in doc.images() {
+        use gltf::image::{Data, Source};
+
+        // Handle remote urls ourselves, but let the gltf crate handle other sources.
+        let url_is_remote = base_url.port_or_known_default().is_some();
+        let dynamic_image = if url_is_remote
+            && let Source::Uri { uri, mime_type } = doc_image.source()
+            && Url::from_str(uri).is_err()
+            && let Ok(full_url) = base_url.join(uri)
+        {
+            let encoded_image = request_data(&full_url).await?;
+
+            let encoded_format = match mime_type {
+                Some("image/png") => ImageFormat::Png,
+                Some("image/jpeg") => ImageFormat::Jpeg,
+                _ => match image::guess_format(&encoded_image) {
+                    Ok(format) => format,
+                    Err(e) => return Err(anyhow::anyhow!("Unsupported format {}", e)),
+                },
+            };
+
+            image::load_from_memory_with_format(&encoded_image, encoded_format)?
+        } else {
+            #[cfg(target_family = "wasm")]
+            let base_path: Option<std::path::PathBuf> = None;
+            #[cfg(not(target_family = "wasm"))]
+            let base_path = base_url.to_file_path().ok();
+            let data =
+                Data::from_source(doc_image.source(), base_path.as_deref(), &buffer_contents)?;
+
+            image_data_to_dynamic_image(data)?
+        };
+        let label = doc_image.name();
+        let dynamic_image = match &dynamic_image {
+            DynamicImage::ImageRgb8(_) => DynamicImage::ImageRgba8(dynamic_image.to_rgba8()),
+            DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgba16(dynamic_image.to_rgba16()),
+            DynamicImage::ImageRgba32F(_) => DynamicImage::ImageRgba32F(dynamic_image.to_rgba32f()),
+            _ => dynamic_image,
+        };
+        let format = match &dynamic_image {
+            DynamicImage::ImageLuma8(_) => wgpu::TextureFormat::R8Unorm,
+            DynamicImage::ImageLumaA8(_) => wgpu::TextureFormat::Rg8Unorm,
+            DynamicImage::ImageRgba8(_) => wgpu::TextureFormat::Rgba8Unorm,
+            DynamicImage::ImageLuma16(_) => wgpu::TextureFormat::R16Unorm,
+            DynamicImage::ImageLumaA16(_) => wgpu::TextureFormat::Rg16Unorm,
+            DynamicImage::ImageRgba16(_) => wgpu::TextureFormat::Rgba16Unorm,
+            DynamicImage::ImageRgb32F(_) => wgpu::TextureFormat::Rgba32Float,
+            other_format => {
+                return Err(anyhow::anyhow!("Unsupported format {:?}", other_format));
+            }
+        };
+        let size = wgpu::Extent3d {
+            width: dynamic_image.width(),
+            height: dynamic_image.height(),
+            ..Default::default()
+        };
+        let mip_level_count = size.width.min(size.height).ilog2().max(1);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label,
+            size,
+            mip_level_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfoBase {
+                texture: &texture,
+                mip_level: 0,
+                origin: Default::default(),
+                aspect: Default::default(),
+            },
+            dynamic_image.as_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: Default::default(),
+                bytes_per_row: format.block_copy_size(None).map(|b| b * size.width),
+                rows_per_image: Default::default(),
+            },
+            size,
+        );
+
+        let blitter = wgpu::util::TextureBlitterBuilder::new(device, format)
+            .sample_type(wgpu::FilterMode::Linear)
+            .build();
+
+        for base_mip_level in 1..mip_level_count {
+            blitter.copy(
+                device,
+                &mut encoder,
+                &texture.create_view(&TextureViewDescriptor {
+                    base_mip_level: base_mip_level - 1,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                }),
+                &texture.create_view(&TextureViewDescriptor {
+                    base_mip_level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                }),
+            );
+        }
+        textures.push(texture);
+    }
+    queue.submit([encoder.finish()]);
+    Ok(textures)
 }
 
 fn image_data_to_dynamic_image(data: gltf::image::Data) -> Result<DynamicImage, anyhow::Error> {
@@ -225,93 +309,6 @@ fn image_data_to_dynamic_image(data: gltf::image::Data) -> Result<DynamicImage, 
                 .map(DynamicImage::ImageRgba32F),
         };
     dynamic_image.ok_or_else(|| anyhow::anyhow!("Could not convert image back into DynamicImage"))
-}
-
-fn dynamic_image_to_texture(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    label: Option<&str>,
-    dynamic_image: image::DynamicImage,
-) -> anyhow::Result<wgpu::Texture> {
-    let dynamic_image = match &dynamic_image {
-        DynamicImage::ImageRgb8(_) => DynamicImage::ImageRgba8(dynamic_image.to_rgba8()),
-        DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgba16(dynamic_image.to_rgba16()),
-        DynamicImage::ImageRgba32F(_) => DynamicImage::ImageRgba32F(dynamic_image.to_rgba32f()),
-        _ => dynamic_image,
-    };
-    let format = match &dynamic_image {
-        DynamicImage::ImageLuma8(_) => wgpu::TextureFormat::R8Unorm,
-        DynamicImage::ImageLumaA8(_) => wgpu::TextureFormat::Rg8Unorm,
-        DynamicImage::ImageRgba8(_) => wgpu::TextureFormat::Rgba8Unorm,
-        DynamicImage::ImageLuma16(_) => wgpu::TextureFormat::R16Unorm,
-        DynamicImage::ImageLumaA16(_) => wgpu::TextureFormat::Rg16Unorm,
-        DynamicImage::ImageRgba16(_) => wgpu::TextureFormat::Rgba16Unorm,
-        DynamicImage::ImageRgb32F(_) => wgpu::TextureFormat::Rgba32Float,
-        other_format => {
-            return Err(anyhow::anyhow!("Unsupported format {:?}", other_format));
-        }
-    };
-    let size = wgpu::Extent3d {
-        width: dynamic_image.width(),
-        height: dynamic_image.height(),
-        ..Default::default()
-    };
-    let mip_level_count = size.width.min(size.height).ilog2().max(1);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label,
-        size,
-        mip_level_count,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::COPY_DST
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
-    });
-
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfoBase {
-            texture: &texture,
-            mip_level: 0,
-            origin: Default::default(),
-            aspect: Default::default(),
-        },
-        dynamic_image.as_bytes(),
-        wgpu::TexelCopyBufferLayout {
-            offset: Default::default(),
-            bytes_per_row: format.block_copy_size(None).map(|b| b * size.width),
-            rows_per_image: Default::default(),
-        },
-        size,
-    );
-
-    let blitter = wgpu::util::TextureBlitterBuilder::new(device, format)
-        .sample_type(wgpu::FilterMode::Linear)
-        .build();
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Blit"),
-    });
-    for base_mip_level in 1..mip_level_count {
-        blitter.copy(
-            device,
-            &mut encoder,
-            &texture.create_view(&TextureViewDescriptor {
-                base_mip_level: base_mip_level - 1,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }),
-            &texture.create_view(&TextureViewDescriptor {
-                base_mip_level,
-                mip_level_count: Some(1),
-                ..Default::default()
-            }),
-        );
-    }
-    queue.submit([encoder.finish()]);
-
-    Ok(texture)
 }
 
 async fn request_data(url: &Url) -> anyhow::Result<Vec<u8>> {
