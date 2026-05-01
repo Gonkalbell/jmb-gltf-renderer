@@ -1,5 +1,6 @@
 use super::{
-    DEPTH_FORMAT, OwnedBufferSlice, bind_groups, shaders::scene::{self, Instance, VertexInput},
+    DEPTH_FORMAT, OwnedBufferSlice, bind_groups,
+    shaders::scene::{self, Instance, VertexInput},
 };
 
 use std::{

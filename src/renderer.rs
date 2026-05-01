@@ -16,14 +16,8 @@ use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
 use tokio::sync::watch::{Receiver, Sender};
-use wgpu::util::DeviceExt;
 
-use camera::ArcBallCamera;
-
-use crate::renderer::{
-    asset::{Asset, LoadingProgress},
-    skybox::Skybox,
-};
+use crate::renderer::{asset::{Asset, LoadingProgress}, camera::ArcBallCamera, skybox::Skybox};
 
 const ASSETS_BASE_URL: &str =
     "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/";
@@ -47,9 +41,7 @@ pub mod bind_groups {
 }
 
 pub struct SceneRenderer {
-    camera_buf: wgpu::Buffer,
-    user_camera: ArcBallCamera,
-    camera_bgroup: bind_groups::Camera,
+    camera: ArcBallCamera,
 
     skybox: Skybox,
 
@@ -66,27 +58,8 @@ impl SceneRenderer {
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
     ) -> Self {
-        // Camera
-
-        let user_camera = ArcBallCamera::default();
-        let camera_buffer_data = user_camera.get_buffer_data();
-
-        let camera_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Uniform Buffer"),
-            contents: bytemuck::bytes_of(&camera_buffer_data),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let camera_bgroup = bind_groups::Camera::from_bindings(
-            device,
-            bind_groups::CameraEntries::new(bind_groups::CameraEntriesParams {
-                res_camera: camera_buf.as_entire_buffer_binding(),
-            }),
-        );
-
+        let camera = ArcBallCamera::new(device);
         let skybox = Skybox::new(device, queue, color_format);
-
-        // Load the GLTF scene
 
         let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
         let asset_tx_clone = asset_tx.clone();
@@ -128,9 +101,7 @@ impl SceneRenderer {
         });
 
         Self {
-            user_camera,
-            camera_buf,
-            camera_bgroup,
+            camera,
 
             skybox,
 
@@ -151,8 +122,7 @@ impl SceneRenderer {
     ) -> Option<wgpu::CommandBuffer> {
         profile_function!();
 
-        let camera = self.user_camera.get_buffer_data();
-        queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
+        self.camera.update_buffer(queue);
 
         None
     }
@@ -160,7 +130,7 @@ impl SceneRenderer {
     pub fn render(&self, rpass: &mut wgpu::RenderPass) {
         profile_function!();
 
-        self.camera_bgroup.set(rpass);
+        self.camera.bgroup.set(rpass);
 
         if let Some(asset) = self.asset_rx.borrow().as_ref() {
             asset.render(rpass);
@@ -175,7 +145,7 @@ impl SceneRenderer {
         let ctx = ui.ctx();
         if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
             ctx.input(|input| {
-                self.user_camera.update(input);
+                self.camera.params.update(input);
             });
         }
 
@@ -185,7 +155,7 @@ impl SceneRenderer {
                     self.show_scene_menu(render_state, ui);
                 });
 
-                ui.menu_button("Camera", |ui| self.user_camera.run_ui(ui));
+                ui.menu_button("Camera", |ui| self.camera.params.run_ui(ui));
 
                 ui.menu_button("Info", |ui| {
                     self.show_info_menu(render_state, ui);

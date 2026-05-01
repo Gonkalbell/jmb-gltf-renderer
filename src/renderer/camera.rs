@@ -3,12 +3,49 @@ use std::f32::consts::TAU;
 use eframe::egui::{self, DragValue, Widget};
 use glam::{EulerRot, Mat4, Vec2, Vec3};
 use puffin::profile_function;
+use wgpu::util::DeviceExt;
 
-use crate::renderer::shaders::bgroup_camera;
+use crate::renderer::{bind_groups, shaders::bgroup_camera};
+
+pub struct ArcBallCamera {
+    pub params: ArcBallCameraParams,
+    pub bgroup: bind_groups::Camera,
+    buffer: wgpu::Buffer,
+}
+
+impl ArcBallCamera {
+    pub fn new(device: &wgpu::Device) -> Self {
+        let params = ArcBallCameraParams::default();
+        let buffer_data = params.get_buffer_data();
+
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Uniform Buffer"),
+            contents: bytemuck::bytes_of(&buffer_data),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let bgroup = bind_groups::Camera::from_bindings(
+            device,
+            bind_groups::CameraEntries::new(bind_groups::CameraEntriesParams {
+                res_camera: buffer.as_entire_buffer_binding(),
+            }),
+        );
+        Self {
+            params,
+            buffer,
+            bgroup,
+        }
+    }
+
+    pub fn update_buffer(&self, queue: &wgpu::Queue) {
+        let camera = self.params.get_buffer_data();
+        queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(&camera));
+    }
+}
 
 /// A user-controlled camera that orbits around the origin.
-#[derive(Debug)]
-pub struct ArcBallCamera {
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArcBallCameraParams {
     center_pos: Vec3,
     pitch_revs: f32,
     yaw_revs: f32,
@@ -18,7 +55,7 @@ pub struct ArcBallCamera {
     fov_y_revs: f32,
 }
 
-impl Default for ArcBallCamera {
+impl Default for ArcBallCameraParams {
     fn default() -> Self {
         Self {
             center_pos: Vec3::ZERO,
@@ -32,7 +69,7 @@ impl Default for ArcBallCamera {
     }
 }
 
-impl ArcBallCamera {
+impl ArcBallCameraParams {
     /// Call once per frame to update the camera's parameters with the current input state.
     pub fn update(&mut self, input: &egui::InputState) {
         profile_function!();
