@@ -281,6 +281,7 @@ async fn request_data(
     }
     let data = match url.scheme() {
         "http" | "https" => reqwest::get(url.clone()).await?.bytes().await?.to_vec(),
+        #[cfg(not(target_family = "wasm"))]
         "file" => {
             let path = url
                 .to_file_path()
