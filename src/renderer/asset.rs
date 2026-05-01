@@ -1,6 +1,5 @@
 use super::{
-    Asset, DEPTH_FORMAT, LoadingProgress, OwnedBufferSlice, Primitive, PrimitiveIndexData,
-    RenderBatch, bind_groups, scene, shaders::scene::Instance, shaders::scene::VertexInput,
+    DEPTH_FORMAT, OwnedBufferSlice, bind_groups, shaders::scene::{self, Instance, VertexInput},
 };
 
 use std::{
@@ -28,6 +27,68 @@ struct OwnedVertexBufferLayout {
 struct PipelineCacheKey {
     attributes: Vec<OwnedVertexBufferLayout>,
     primitive_state: wgpu::PrimitiveState,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Asset {
+    info: String,
+    batches: Vec<RenderBatch>,
+    instance_bgroup: bind_groups::Instance,
+}
+
+impl Asset {
+    pub fn info(&self) -> &str {
+        &self.info
+    }
+
+    pub fn render(&self, rpass: &mut wgpu::RenderPass<'_>) {
+        self.instance_bgroup.set(rpass);
+
+        for batch in self.batches.iter() {
+            rpass.set_pipeline(&batch.pipeline);
+
+            for primitive in batch.mesh_primitives.iter() {
+                for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
+                    rpass.set_vertex_buffer(i as _, attrib.as_slice());
+                }
+
+                if let Some(index_data) = &primitive.index_data {
+                    rpass.set_index_buffer(index_data.buffer_slice.as_slice(), index_data.format);
+                }
+
+                if primitive.index_data.is_none() {
+                    rpass.draw(0..primitive.draw_count, primitive.instances.clone());
+                } else {
+                    rpass.draw_indexed(0..primitive.draw_count, 0, primitive.instances.clone());
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderBatch {
+    pipeline: wgpu::RenderPipeline,
+    mesh_primitives: Vec<Primitive>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Primitive {
+    attrib_buffers: Vec<OwnedBufferSlice>,
+    draw_count: u32,
+    index_data: Option<PrimitiveIndexData>,
+    instances: Range<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PrimitiveIndexData {
+    format: wgpu::IndexFormat,
+    buffer_slice: OwnedBufferSlice,
+}
+
+pub struct LoadingProgress {
+    pub loaded: usize,
+    pub total: usize,
 }
 
 pub async fn load_asset(
@@ -265,7 +326,7 @@ pub async fn load_asset(
 
     log::info!("finished loading {}", &url);
     Ok(Asset {
-        asset_info,
+        info: asset_info,
         batches,
         instance_bgroup,
     })
