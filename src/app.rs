@@ -1,10 +1,12 @@
 //! Since I mostly want to do my own rendering, very little actually happens in the top level `App` struct. Instead,
 //! most of the rendering logic actually happens in `renderer.rs`
 
-use eframe::egui;
-use eframe::egui_wgpu::CallbackTrait;
+use eframe::egui::{self, RichText, Widget};
+use eframe::egui_wgpu::{self, CallbackTrait};
+use puffin::profile_function;
+use reqwest::Url;
 
-use crate::SceneRenderer;
+use crate::{ASSETS_BASE_URL, SceneRenderer, asset};
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(Default, serde::Deserialize, serde::Serialize)]
@@ -46,6 +48,7 @@ impl eframe::App for RendererApp {
 
     /// Called when the UI is being composed. This is where all rendering happens.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        profile_function!();
         let render_state = frame
             .wgpu_render_state()
             .expect("WGPU is not properly initialized");
@@ -55,18 +58,191 @@ impl eframe::App for RendererApp {
             .callback_resources
             .get_mut::<SceneRenderer>()
         {
-            renderer.run_ui(ui, render_state);
+            {
+                let ctx = ui.ctx();
+                if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
+                    ctx.input(|input| {
+                        renderer.camera.params.update(input);
+                    });
+                }
+
+                egui::Panel::top("top_panel").show_inside(ui, |ui| {
+                    egui::MenuBar::new().ui(ui, |ui| {
+                        ui.menu_button("Asset", |ui| {
+                            show_scene_menu(render_state, ui, renderer);
+                        });
+
+                        ui.menu_button("Camera", |ui| renderer.camera.params.run_ui(ui));
+
+                        ui.menu_button("Info", |ui| {
+                            show_info_menu(render_state, ui, renderer);
+                        });
+                        if let Ok(loading_progress) = renderer.loading_progress.try_lock()
+                            && loading_progress.loaded != loading_progress.total
+                        {
+                            let progress =
+                                loading_progress.loaded as f32 / loading_progress.total as f32;
+                            egui::ProgressBar::new(progress)
+                                .text(format!(
+                                    "loading {} / {}",
+                                    loading_progress.loaded, loading_progress.total
+                                ))
+                                .animate(true)
+                                .ui(ui);
+                        }
+                    });
+                });
+            };
         }
 
-        // Run our custom rendering as a callback. Normally eframe is set up to allow you to handle custom rendering in
-        // panels, windows, and other widgets. But the rendering is the star of the show here, so we'll render to the
-        // whole screen
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.painter()
                 .add(eframe::egui_wgpu::Callback::new_paint_callback(
                     ui.viewport_rect(),
-                    CustomCallback,
+                    RenderCallback,
                 ));
+        });
+    }
+}
+
+fn show_info_menu(
+    render_state: &eframe::egui_wgpu::RenderState,
+    ui: &mut egui::Ui,
+    renderer: &mut SceneRenderer,
+) {
+    if let Some(asset) = renderer.asset_rx.borrow().as_ref() {
+        ui.menu_button("Asset", |ui| {
+            ui.label(asset.info());
+        });
+    }
+    ui.menu_button("Adapter", |ui| {
+        let info = render_state.adapter.get_info();
+        ui.label(format!("name: {}", info.name));
+        ui.label(format!("backend: {}", info.backend));
+        ui.label(format!("driver: {}", info.driver));
+        ui.label(format!("driver info: {}", info.driver_info));
+        ui.label(format!("type: {:?}", info.device_type));
+    });
+    ui.menu_button("Counters", |ui| {
+        let counters = render_state.device.get_internal_counters().hal;
+        ui.label(format!("buffers: {}", counters.buffers.read()));
+        ui.label(format!("textures: {}", counters.textures.read()));
+        ui.label(format!("texture_views: {}", counters.texture_views.read()));
+        ui.label(format!("bind_groups: {}", counters.bind_groups.read()));
+        ui.label(format!(
+            "bind_group_layouts: {}",
+            counters.bind_group_layouts.read()
+        ));
+        ui.label(format!(
+            "render_pipelines: {}",
+            counters.render_pipelines.read()
+        ));
+        ui.label(format!(
+            "compute_pipelines: {}",
+            counters.compute_pipelines.read()
+        ));
+        ui.label(format!(
+            "pipeline_layouts: {}",
+            counters.pipeline_layouts.read()
+        ));
+        ui.label(format!("samplers: {}", counters.samplers.read()));
+        ui.label(format!(
+            "command_encoders: {}",
+            counters.command_encoders.read()
+        ));
+        ui.label(format!(
+            "shader_modules: {}",
+            counters.shader_modules.read()
+        ));
+        ui.label(format!("query_sets: {}", counters.query_sets.read()));
+        ui.label(format!("fences: {}", counters.fences.read()));
+        ui.label(format!("buffer_memory: {}", counters.buffer_memory.read()));
+        ui.label(format!(
+            "texture_memory: {}",
+            counters.texture_memory.read()
+        ));
+        ui.label(format!(
+            "acceleration_structure_memory: {}",
+            counters.acceleration_structure_memory.read()
+        ));
+        ui.label(format!(
+            "memory_allocations: {}",
+            counters.memory_allocations.read()
+        ));
+    });
+
+    if let Some(report) = render_state.device.generate_allocator_report() {
+        ui.menu_button("Allocation Report", |ui| {
+            for (i, block) in report.blocks.iter().enumerate() {
+                ui.menu_button(format!("block {}: {}", i, block.size), |ui| {
+                    let mut sorted_allocations =
+                        report.allocations[block.allocations.clone()].to_owned();
+                    sorted_allocations.sort_by_key(|a| a.offset);
+                    for allocation in sorted_allocations.iter() {
+                        ui.label(
+                            RichText::new(format!(
+                                "{:08X}-{:08X} {}",
+                                allocation.offset,
+                                allocation.offset + allocation.size,
+                                allocation.name
+                            ))
+                            .monospace(),
+                        );
+                    }
+                });
+            }
+            ui.label(format!(
+                "total_allocated_bytes: {}",
+                report.total_allocated_bytes
+            ));
+            ui.label(format!(
+                "total_allocated_bytes: {}",
+                report.total_reserved_bytes
+            ));
+        });
+    }
+}
+
+fn show_scene_menu(
+    render_state: &eframe::egui_wgpu::RenderState,
+    ui: &mut egui::Ui,
+    renderer: &mut SceneRenderer,
+) {
+    let model_list = renderer.asset_list.borrow();
+    if !model_list.is_empty() {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for model in model_list.iter() {
+                ui.menu_button(&model.label, |ui| {
+                    for (variant, file) in &model.variants {
+                        if ui.button(variant).clicked() {
+                            let asset_tx = renderer.asset_tx.clone();
+                            let egui_wgpu::RenderState {
+                                device,
+                                queue,
+                                target_format,
+                                ..
+                            } = render_state.clone();
+                            let url = Url::parse(ASSETS_BASE_URL)
+                                .unwrap()
+                                .join(&format!("{}/{}/{}", &model.name, variant, file))
+                                .unwrap();
+                            let loading_progress = renderer.loading_progress.clone();
+                            crate::spawn(async move {
+                                let scene = asset::load_asset(
+                                    url,
+                                    &device,
+                                    &queue,
+                                    target_format,
+                                    loading_progress,
+                                )
+                                .await
+                                .unwrap();
+                                let _ = asset_tx.send(Some(scene));
+                            });
+                        }
+                    }
+                });
+            }
         });
     }
 }
@@ -79,9 +255,9 @@ impl eframe::App for RendererApp {
 //     `wgpu::RenderPass`s that all target the `wgpu::SurfaceTexture`
 //   - `CustomCallback` must be recreated every frame. In fact `new_paint_callback` allocates a new Arc every frame.
 // If any of these become a deal breaker, I may consider just using `winit` and `egui` directly. .
-struct CustomCallback;
+struct RenderCallback;
 
-impl CallbackTrait for CustomCallback {
+impl CallbackTrait for RenderCallback {
     fn paint(
         &self,
         _info: egui::PaintCallbackInfo,
@@ -89,25 +265,36 @@ impl CallbackTrait for CustomCallback {
         callback_resources: &eframe::egui_wgpu::CallbackResources,
     ) {
         if let Some(renderer) = callback_resources.get::<SceneRenderer>() {
-            renderer.render(render_pass);
+            {
+                let this = &renderer;
+                profile_function!();
+
+                this.camera.bgroup.set(render_pass);
+
+                if let Some(asset) = this.asset_rx.borrow().as_ref() {
+                    asset.render(render_pass);
+                }
+
+                this.skybox.render(render_pass);
+            };
         }
     }
 
     fn prepare(
         &self,
-        device: &eframe::wgpu::Device,
+        _device: &eframe::wgpu::Device,
         queue: &eframe::wgpu::Queue,
-        screen_descriptor: &eframe::egui_wgpu::ScreenDescriptor,
-        egui_encoder: &mut eframe::wgpu::CommandEncoder,
+        _screen_descriptor: &eframe::egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut eframe::wgpu::CommandEncoder,
         callback_resources: &mut eframe::egui_wgpu::CallbackResources,
     ) -> Vec<eframe::wgpu::CommandBuffer> {
+        profile_function!();
         if let Some(renderer) = callback_resources.get::<SceneRenderer>() {
-            return Vec::from_iter(renderer.prepare(
-                device,
-                queue,
-                screen_descriptor,
-                egui_encoder,
-            ));
+            return Vec::from_iter({
+                renderer.camera.update_buffer(queue);
+
+                None
+            });
         }
         Vec::new()
     }
