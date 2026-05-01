@@ -1,7 +1,6 @@
 use wgpu::util::DeviceExt;
 
-use crate::renderer::DEPTH_FORMAT;
-use crate::renderer::{bind_groups, shaders::skybox};
+use crate::{DEPTH_FORMAT, bind_groups, shaders::skybox};
 
 pub struct Skybox {
     skybox_bgroup: bind_groups::Skybox,
@@ -14,7 +13,7 @@ impl Skybox {
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
     ) -> Skybox {
-        let ktx_reader = ktx2::Reader::new(include_bytes!("../../assets/rgba8.ktx2"))
+        let ktx_reader = ktx2::Reader::new(include_bytes!("assets/rgba8.ktx2"))
             .expect("Failed to find skybox texture");
         let mut image = Vec::with_capacity(ktx_reader.data().len());
         for level in ktx_reader.levels() {

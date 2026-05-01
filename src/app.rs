@@ -4,7 +4,7 @@
 use eframe::egui;
 use eframe::egui_wgpu::CallbackTrait;
 
-use crate::renderer::SceneRenderer;
+use crate::SceneRenderer;
 
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(Default, serde::Deserialize, serde::Serialize)]

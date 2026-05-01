@@ -12,7 +12,7 @@ async fn main() -> eframe::Result {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_icon(
             // NOTE: Adding an icon is optional
-            eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon-256.png")[..])
+            eframe::icon_data::from_png_bytes(&include_bytes!("assets/icon-256.png")[..])
                 .expect("Failed to load icon"),
         ),
         wgpu_options: Default::default(),

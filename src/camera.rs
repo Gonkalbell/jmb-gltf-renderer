@@ -5,7 +5,7 @@ use glam::{EulerRot, Mat4, Vec2, Vec3};
 use puffin::profile_function;
 use wgpu::util::DeviceExt;
 
-use crate::renderer::{bind_groups, shaders::bgroup_camera};
+use crate::{bind_groups, shaders::bgroup_camera};
 
 pub struct ArcBallCamera {
     pub params: ArcBallCameraParams,
