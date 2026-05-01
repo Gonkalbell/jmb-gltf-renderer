@@ -8,9 +8,10 @@ use super::{
 };
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use gltf::mesh::Mode;
-use image::{DynamicImage, ImageFormat};
+use image::DynamicImage;
 use reqwest::Url;
-use std::{collections::HashMap, fmt::Write, ops::Range, str::FromStr};
+use std::borrow::Cow;
+use std::{collections::HashMap, fmt::Write, ops::Range};
 use wgpu::util::DeviceExt;
 use wgpu::wgt::TextureViewDescriptor;
 
@@ -32,33 +33,22 @@ pub async fn load_asset(
     queue: &wgpu::Queue,
     color_format: wgpu::TextureFormat,
 ) -> anyhow::Result<Asset> {
-    let gltf_file = request_data(&url).await?;
-    let gltf_file = gltf::Gltf::from_slice(&gltf_file)?;
+    let gltf_file = gltf::Gltf::from_slice(&request_data(&url).await?)?;
     let doc = gltf_file.document;
-    let mut blob = gltf_file.blob;
 
-    let mut buffer_contents = Vec::new();
-    for doc_buffer in doc.buffers() {
-        use gltf::buffer::{Data, Source};
+    let mut buffer_contents =
+        futures::future::try_join_all(doc.buffers().map(async |doc_buffer| {
+            use gltf::buffer::Source;
+            let contents = match doc_buffer.source() {
+                Source::Bin => Vec::new(),
+                Source::Uri(uri) => request_data(&url.join(uri)?).await?,
+            };
+            Ok::<_, anyhow::Error>(contents)
+        }))
+        .await?;
 
-        // Handle remote urls ourselves, but let the gltf crate handle other sources.
-        let url_is_remote = url.port_or_known_default().is_some();
-        if url_is_remote
-            && let Source::Uri(doc_uri) = doc_buffer.source()
-            && Url::from_str(doc_uri).is_err()
-            && let Ok(full_url) = url.join(doc_uri)
-        {
-            let data = request_data(&full_url).await.map(Data)?;
-            buffer_contents.push(data);
-        } else {
-            #[cfg(target_family = "wasm")]
-            let base_path: Option<std::path::PathBuf> = None;
-            #[cfg(not(target_family = "wasm"))]
-            let base_path = url.to_file_path().ok();
-            let data =
-                Data::from_source_and_blob(doc_buffer.source(), base_path.as_deref(), &mut blob)?;
-            buffer_contents.push(data);
-        }
+    if let Some(blob) = gltf_file.blob {
+        buffer_contents[0] = blob
     }
 
     let buffers: Vec<_> = doc
@@ -85,7 +75,107 @@ pub async fn load_asset(
         })
         .collect();
 
-    let _textures = import_textures(&url, device, queue, &doc, buffer_contents).await?;
+    let _textures = futures::future::try_join_all(doc.images().map(async |doc_image| {
+        use gltf::image::Source;
+        let contents = match doc_image.source() {
+            Source::View { view, .. } => {
+                let parent_buffer_data = &buffer_contents[view.buffer().index()];
+                let begin = view.offset();
+                let end = begin + view.length();
+                let contents = &parent_buffer_data[begin..end];
+                Cow::Borrowed(contents)
+            }
+            Source::Uri { uri, .. } => {
+                let data = request_data(&url.join(uri)?).await?;
+                Cow::Owned(data)
+            }
+        };
+
+        let dynamic_image = image::load_from_memory(&contents)?;
+
+        // wgpu doesn't support 3 channel types, so I need to convert these
+        let dynamic_image = match &dynamic_image {
+            DynamicImage::ImageRgb8(_) => DynamicImage::ImageRgba8(dynamic_image.to_rgba8()),
+            DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgba16(dynamic_image.to_rgba16()),
+            DynamicImage::ImageRgba32F(_) => DynamicImage::ImageRgba32F(dynamic_image.to_rgba32f()),
+            _ => dynamic_image,
+        };
+        let format = match &dynamic_image {
+            DynamicImage::ImageLuma8(_) => wgpu::TextureFormat::R8Unorm,
+            DynamicImage::ImageLumaA8(_) => wgpu::TextureFormat::Rg8Unorm,
+            DynamicImage::ImageRgba8(_) => wgpu::TextureFormat::Rgba8Unorm,
+            DynamicImage::ImageLuma16(_) => wgpu::TextureFormat::R16Unorm,
+            DynamicImage::ImageLumaA16(_) => wgpu::TextureFormat::Rg16Unorm,
+            DynamicImage::ImageRgba16(_) => wgpu::TextureFormat::Rgba16Unorm,
+            DynamicImage::ImageRgb32F(_) => wgpu::TextureFormat::Rgba32Float,
+            other_format => {
+                return Err(anyhow::anyhow!("Unsupported format {:?}", other_format));
+            }
+        };
+        let size: wgpu::Extent3d = wgpu::Extent3d {
+            width: dynamic_image.width(),
+            height: dynamic_image.height(),
+            ..Default::default()
+        };
+        let mip_level_count = size.width.min(size.height).ilog2().max(1);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: doc_image.name(),
+            size,
+            mip_level_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfoBase {
+                texture: &texture,
+                mip_level: 0,
+                origin: Default::default(),
+                aspect: Default::default(),
+            },
+            dynamic_image.as_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: Default::default(),
+                bytes_per_row: format.block_copy_size(None).map(|b| b * size.width),
+                rows_per_image: Default::default(),
+            },
+            size,
+        );
+
+        let blitter = wgpu::util::TextureBlitterBuilder::new(device, format)
+            .sample_type(wgpu::FilterMode::Linear)
+            .build();
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("blitting"),
+        });
+        for base_mip_level in 1..mip_level_count {
+            blitter.copy(
+                device,
+                &mut encoder,
+                &texture.create_view(&TextureViewDescriptor {
+                    base_mip_level: base_mip_level - 1,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                }),
+                &texture.create_view(&TextureViewDescriptor {
+                    base_mip_level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                }),
+            );
+        }
+
+        queue.submit([encoder.finish()]);
+
+        Ok::<_, anyhow::Error>(dynamic_image)
+    }))
+    .await?;
 
     let samplers: Vec<_> = doc
         .samplers()
@@ -160,161 +250,25 @@ pub async fn load_asset(
     })
 }
 
-async fn import_textures(
-    base_url: &Url,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    doc: &gltf::Document,
-    buffer_contents: Vec<gltf::buffer::Data>,
-) -> Result<Vec<wgpu::Texture>, anyhow::Error> {
-    let mut textures = Vec::new();
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Blit"),
-    });
-    for doc_image in doc.images() {
-        use gltf::image::{Data, Source};
-
-        // Handle remote urls ourselves, but let the gltf crate handle other sources.
-        let url_is_remote = base_url.port_or_known_default().is_some();
-        let dynamic_image = if url_is_remote
-            && let Source::Uri { uri, mime_type } = doc_image.source()
-            && Url::from_str(uri).is_err()
-            && let Ok(full_url) = base_url.join(uri)
-        {
-            let encoded_image = request_data(&full_url).await?;
-
-            let encoded_format = match mime_type {
-                Some("image/png") => ImageFormat::Png,
-                Some("image/jpeg") => ImageFormat::Jpeg,
-                _ => match image::guess_format(&encoded_image) {
-                    Ok(format) => format,
-                    Err(e) => return Err(anyhow::anyhow!("Unsupported format {}", e)),
-                },
-            };
-
-            image::load_from_memory_with_format(&encoded_image, encoded_format)?
-        } else {
-            #[cfg(target_family = "wasm")]
-            let base_path: Option<std::path::PathBuf> = None;
-            #[cfg(not(target_family = "wasm"))]
-            let base_path = base_url.to_file_path().ok();
-            let data =
-                Data::from_source(doc_image.source(), base_path.as_deref(), &buffer_contents)?;
-
-            image_data_to_dynamic_image(data)?
-        };
-        let label = doc_image.name();
-        let dynamic_image = match &dynamic_image {
-            DynamicImage::ImageRgb8(_) => DynamicImage::ImageRgba8(dynamic_image.to_rgba8()),
-            DynamicImage::ImageRgb16(_) => DynamicImage::ImageRgba16(dynamic_image.to_rgba16()),
-            DynamicImage::ImageRgba32F(_) => DynamicImage::ImageRgba32F(dynamic_image.to_rgba32f()),
-            _ => dynamic_image,
-        };
-        let format = match &dynamic_image {
-            DynamicImage::ImageLuma8(_) => wgpu::TextureFormat::R8Unorm,
-            DynamicImage::ImageLumaA8(_) => wgpu::TextureFormat::Rg8Unorm,
-            DynamicImage::ImageRgba8(_) => wgpu::TextureFormat::Rgba8Unorm,
-            DynamicImage::ImageLuma16(_) => wgpu::TextureFormat::R16Unorm,
-            DynamicImage::ImageLumaA16(_) => wgpu::TextureFormat::Rg16Unorm,
-            DynamicImage::ImageRgba16(_) => wgpu::TextureFormat::Rgba16Unorm,
-            DynamicImage::ImageRgb32F(_) => wgpu::TextureFormat::Rgba32Float,
-            other_format => {
-                return Err(anyhow::anyhow!("Unsupported format {:?}", other_format));
-            }
-        };
-        let size = wgpu::Extent3d {
-            width: dynamic_image.width(),
-            height: dynamic_image.height(),
-            ..Default::default()
-        };
-        let mip_level_count = size.width.min(size.height).ilog2().max(1);
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label,
-            size,
-            mip_level_count,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[format.add_srgb_suffix(), format.remove_srgb_suffix()],
-        });
-
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfoBase {
-                texture: &texture,
-                mip_level: 0,
-                origin: Default::default(),
-                aspect: Default::default(),
-            },
-            dynamic_image.as_bytes(),
-            wgpu::TexelCopyBufferLayout {
-                offset: Default::default(),
-                bytes_per_row: format.block_copy_size(None).map(|b| b * size.width),
-                rows_per_image: Default::default(),
-            },
-            size,
-        );
-
-        let blitter = wgpu::util::TextureBlitterBuilder::new(device, format)
-            .sample_type(wgpu::FilterMode::Linear)
-            .build();
-
-        for base_mip_level in 1..mip_level_count {
-            blitter.copy(
-                device,
-                &mut encoder,
-                &texture.create_view(&TextureViewDescriptor {
-                    base_mip_level: base_mip_level - 1,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                }),
-                &texture.create_view(&TextureViewDescriptor {
-                    base_mip_level,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                }),
-            );
-        }
-        textures.push(texture);
-    }
-    queue.submit([encoder.finish()]);
-    Ok(textures)
-}
-
-fn image_data_to_dynamic_image(data: gltf::image::Data) -> Result<DynamicImage, anyhow::Error> {
-    use gltf::image::Format;
-
-    let w = data.width;
-    let h = data.height;
-    let p = data.pixels;
-    let dynamic_image =
-        match &data.format {
-            Format::R8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageLuma8),
-            Format::R8G8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageLumaA8),
-            Format::R8G8B8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageRgb8),
-            Format::R8G8B8A8 => image::ImageBuffer::from_vec(w, h, p).map(DynamicImage::ImageRgba8),
-            Format::R16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
-                .map(DynamicImage::ImageLuma16),
-            Format::R16G16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
-                .map(DynamicImage::ImageLumaA16),
-            Format::R16G16B16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
-                .map(DynamicImage::ImageRgb16),
-            Format::R16G16B16A16 => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
-                .map(DynamicImage::ImageRgba16),
-            Format::R32G32B32FLOAT => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
-                .map(DynamicImage::ImageRgb32F),
-            Format::R32G32B32A32FLOAT => image::ImageBuffer::from_vec(w, h, bytemuck::cast_vec(p))
-                .map(DynamicImage::ImageRgba32F),
-        };
-    dynamic_image.ok_or_else(|| anyhow::anyhow!("Could not convert image back into DynamicImage"))
-}
-
 async fn request_data(url: &Url) -> anyhow::Result<Vec<u8>> {
-    log::info!("requesting {}", &url);
-    let data = reqwest::get(url.clone()).await?.bytes().await?.to_vec();
-    log::info!("received {}", &url);
+    let data = match url.scheme() {
+        "http" | "https" => reqwest::get(url.clone()).await?.bytes().await?.to_vec(),
+        "file" => {
+            let path = url
+                .to_file_path()
+                .map_err(|_| anyhow::anyhow!("Invalid file URL"))?;
+            tokio::fs::read(path).await?
+        }
+        "data" => {
+            let data_url =
+                data_url::DataUrl::process(url.as_str()).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            let (data, _) = data_url
+                .decode_to_vec()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            data
+        }
+        other => anyhow::bail!("Unsupported scheme: {}", other),
+    };
     Ok(data)
 }
 

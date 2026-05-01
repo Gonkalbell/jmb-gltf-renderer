@@ -323,7 +323,7 @@ impl SceneRenderer {
         egui::Panel::top("top_panel").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Asset", |ui| {
-                    self.show_scene_menu(&render_state, ui);
+                    self.show_scene_menu(render_state, ui);
                 });
 
                 ui.menu_button("Camera", |ui| self.user_camera.run_ui(ui));
@@ -449,10 +449,14 @@ impl SceneRenderer {
                                     .join(&format!("{}/{}/{}", &model.name, variant, file))
                                     .unwrap();
                                 crate::spawn(async move {
-                                    let scene =
-                                        gltf_loader::load_asset(url, &device, &queue, target_format)
-                                            .await
-                                            .unwrap();
+                                    let scene = gltf_loader::load_asset(
+                                        url,
+                                        &device,
+                                        &queue,
+                                        target_format,
+                                    )
+                                    .await
+                                    .unwrap();
                                     let _ = asset_tx.send(Some(scene));
                                 });
                             }
