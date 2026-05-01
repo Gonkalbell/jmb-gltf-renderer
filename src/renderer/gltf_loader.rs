@@ -1,7 +1,6 @@
 use super::{
-    Asset, DEPTH_FORMAT, InstanceBindGroup, InstanceBindGroupEntries,
-    InstanceBindGroupEntriesParams, LoadingProgress, OwnedBufferSlice, Primitive,
-    PrimitiveIndexData, RenderBatch, scene, shaders::scene::Instance, shaders::scene::VertexInput,
+    Asset, DEPTH_FORMAT, LoadingProgress, OwnedBufferSlice, Primitive, PrimitiveIndexData,
+    RenderBatch, bind_groups, scene, shaders::scene::Instance, shaders::scene::VertexInput,
 };
 
 use std::{
@@ -310,7 +309,7 @@ struct MeshIndex(usize);
 fn generate_nodes(
     device: &wgpu::Device,
     doc: &gltf::Document,
-) -> (InstanceBindGroup, HashMap<MeshIndex, Range<u32>>) {
+) -> (bind_groups::Instance, HashMap<MeshIndex, Range<u32>>) {
     // Get world transforms
     let mut nodes_to_visit = Vec::new();
     for doc_scene in doc.scenes() {
@@ -380,9 +379,9 @@ fn generate_nodes(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    let instance_bgroup = InstanceBindGroup::from_bindings(
+    let instance_bgroup = bind_groups::Instance::from_bindings(
         device,
-        InstanceBindGroupEntries::new(InstanceBindGroupEntriesParams {
+        bind_groups::InstanceEntries::new(bind_groups::InstanceEntriesParams {
             res_instances: instance_buf.as_entire_buffer_binding(),
         }),
     );

@@ -1,5 +1,6 @@
 mod camera;
 mod gltf_loader;
+mod skybox;
 
 #[allow(clippy::all)]
 mod shaders;
@@ -22,29 +23,35 @@ use wgpu::util::DeviceExt;
 
 use camera::ArcBallCamera;
 
-use shaders::*;
+use shaders::scene;
+
+use crate::renderer::skybox::Skybox;
 
 const ASSETS_BASE_URL: &str =
     "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/";
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
-type CameraBindGroup = bgroup_camera::WgpuBindGroup0;
-type CameraBindGroupEntries<'a> = bgroup_camera::WgpuBindGroup0Entries<'a>;
-type CameraBindGroupEntriesParams<'a> = bgroup_camera::WgpuBindGroup0EntriesParams<'a>;
+pub mod bind_groups {
+    use super::shaders::*;
 
-type InstanceBindGroup = scene::WgpuBindGroup1;
-type InstanceBindGroupEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
-type InstanceBindGroupEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
+    pub type Camera = bgroup_camera::WgpuBindGroup0;
+    pub type CameraEntries<'a> = bgroup_camera::WgpuBindGroup0Entries<'a>;
+    pub type CameraEntriesParams<'a> = bgroup_camera::WgpuBindGroup0EntriesParams<'a>;
 
-type SkyboxBindGroup = skybox::WgpuBindGroup1;
-type SkyboxBindGroupEntries<'a> = skybox::WgpuBindGroup1Entries<'a>;
-type SkyboxBindGroupEntriesParams<'a> = skybox::WgpuBindGroup1EntriesParams<'a>;
+    pub type Instance = scene::WgpuBindGroup1;
+    pub type InstanceEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
+    pub type InstanceEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
+
+    pub type Skybox = skybox::WgpuBindGroup1;
+    pub type SkyboxEntries<'a> = skybox::WgpuBindGroup1Entries<'a>;
+    pub type SkyboxEntriesParams<'a> = skybox::WgpuBindGroup1EntriesParams<'a>;
+}
 
 pub struct SceneRenderer {
     camera_buf: wgpu::Buffer,
     user_camera: ArcBallCamera,
-    camera_bgroup: CameraBindGroup,
+    camera_bgroup: bind_groups::Camera,
 
     skybox: Skybox,
 
@@ -72,9 +79,9 @@ impl SceneRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let camera_bgroup = CameraBindGroup::from_bindings(
+        let camera_bgroup = bind_groups::Camera::from_bindings(
             device,
-            CameraBindGroupEntries::new(CameraBindGroupEntriesParams {
+            bind_groups::CameraEntries::new(bind_groups::CameraEntriesParams {
                 res_camera: camera_buf.as_entire_buffer_binding(),
             }),
         );
@@ -360,7 +367,7 @@ struct ModelLinkInfo {
 struct Asset {
     asset_info: String,
     batches: Vec<RenderBatch>,
-    instance_bgroup: InstanceBindGroup,
+    instance_bgroup: bind_groups::Instance,
 }
 
 impl Asset {
@@ -428,103 +435,5 @@ impl OwnedBufferSlice {
     fn as_slice<'a>(&'a self) -> wgpu::BufferSlice<'a> {
         self.buffer
             .slice(self.offset..self.offset + self.size.get())
-    }
-}
-
-struct Skybox {
-    skybox_bgroup: SkyboxBindGroup,
-    skybox_pipeline: wgpu::RenderPipeline,
-}
-
-impl Skybox {
-    fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        color_format: wgpu::TextureFormat,
-    ) -> Skybox {
-        let ktx_reader = ktx2::Reader::new(include_bytes!("../assets/rgba8.ktx2"))
-            .expect("Failed to find skybox texture");
-        let mut image = Vec::with_capacity(ktx_reader.data().len());
-        for level in ktx_reader.levels() {
-            image.extend_from_slice(level.data);
-        }
-        let ktx_header = ktx_reader.header();
-        let skybox_tex = device.create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some("../assets/rgba8.ktx2"),
-                size: wgpu::Extent3d {
-                    width: ktx_header.pixel_width,
-                    height: ktx_header.pixel_height,
-                    depth_or_array_layers: ktx_header.face_count,
-                },
-                mip_level_count: ktx_header.level_count,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::MipMajor,
-            &image,
-        );
-        let skybox_tview = skybox_tex.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("../assets/rgba8.ktx2"),
-            dimension: Some(wgpu::TextureViewDimension::Cube),
-            ..wgpu::TextureViewDescriptor::default()
-        });
-
-        let skybox_bgroup = SkyboxBindGroup::from_bindings(
-            device,
-            SkyboxBindGroupEntries::new(SkyboxBindGroupEntriesParams {
-                res_texture: &skybox_tview,
-                res_sampler: &device.create_sampler(&wgpu::SamplerDescriptor {
-                    label: Some("skybox sampler"),
-                    address_mode_u: wgpu::AddressMode::ClampToEdge,
-                    address_mode_v: wgpu::AddressMode::ClampToEdge,
-                    address_mode_w: wgpu::AddressMode::ClampToEdge,
-                    mag_filter: wgpu::FilterMode::Linear,
-                    min_filter: wgpu::FilterMode::Linear,
-                    mipmap_filter: wgpu::MipmapFilterMode::Linear,
-                    ..Default::default()
-                }),
-            }),
-        );
-
-        let shader = skybox::create_shader_module_embed_source(device);
-        let skybox_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("skybox"),
-            layout: Some(&skybox::create_pipeline_layout(device)),
-            vertex: skybox::vertex_state(&shader, &skybox::vs_skybox_entry()),
-            fragment: Some(skybox::fragment_state(
-                &shader,
-                &skybox::fs_skybox_entry([Some(color_format.into())]),
-            )),
-            primitive: wgpu::PrimitiveState {
-                front_face: wgpu::FrontFace::Cw,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: DEPTH_FORMAT,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        Self {
-            skybox_bgroup,
-            skybox_pipeline,
-        }
-    }
-
-    fn render(&self, rpass: &mut wgpu::RenderPass<'_>) {
-        self.skybox_bgroup.set(rpass);
-        rpass.set_pipeline(&self.skybox_pipeline);
-        rpass.draw(0..3, 0..1);
     }
 }
