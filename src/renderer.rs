@@ -4,8 +4,12 @@ mod gltf_loader;
 #[allow(clippy::all)]
 mod shaders;
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 
+use eframe::egui::Widget;
 use eframe::{
     egui::{self, RichText, ahash::HashMap},
     egui_wgpu, wgpu,
@@ -49,6 +53,12 @@ pub struct SceneRenderer {
     asset_tx: Sender<Option<Asset>>,
 
     asset_list: Receiver<Vec<ModelLinkInfo>>,
+    loading_progress: Arc<Mutex<LoadingProgress>>,
+}
+
+struct LoadingProgress {
+    loaded: usize,
+    total: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,16 +226,29 @@ impl SceneRenderer {
         let asset_tx_clone = asset_tx.clone();
         let device = device.clone();
         let queue = queue.clone();
-        crate::spawn(async move {
-            let url = Url::parse(ASSETS_BASE_URL)
-                .unwrap()
-                .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
-                .unwrap();
-            let loaded_scene = gltf_loader::load_asset(url, &device, &queue, color_format)
+        let loading_progress = Arc::new(Mutex::new(LoadingProgress {
+            loaded: 1,
+            total: 1,
+        }));
+        {
+            let loading_progress_clone = loading_progress.clone();
+            crate::spawn(async move {
+                let url = Url::parse(ASSETS_BASE_URL)
+                    .unwrap()
+                    .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
+                    .unwrap();
+                let loaded_scene = gltf_loader::load_asset(
+                    url,
+                    &device,
+                    &queue,
+                    color_format,
+                    loading_progress_clone,
+                )
                 .await
                 .unwrap();
-            let _ = asset_tx_clone.send(Some(loaded_scene));
-        });
+                let _ = asset_tx_clone.send(Some(loaded_scene));
+            });
+        }
 
         // Load the asset list
 
@@ -255,6 +278,7 @@ impl SceneRenderer {
             asset_tx,
 
             asset_list: asset_list_rx,
+            loading_progress,
         }
     }
 
@@ -331,6 +355,18 @@ impl SceneRenderer {
                 ui.menu_button("Info", |ui| {
                     self.show_info_menu(render_state, ui);
                 });
+                if let Ok(loading_progress) = self.loading_progress.try_lock()
+                    && loading_progress.loaded != loading_progress.total
+                {
+                    let progress = loading_progress.loaded as f32 / loading_progress.total as f32;
+                    egui::ProgressBar::new(progress)
+                        .text(format!(
+                            "loading {} / {}",
+                            loading_progress.loaded, loading_progress.total
+                        ))
+                        .animate(true)
+                        .ui(ui);
+                }
             });
         });
     }
@@ -448,12 +484,14 @@ impl SceneRenderer {
                                     .unwrap()
                                     .join(&format!("{}/{}/{}", &model.name, variant, file))
                                     .unwrap();
+                                let loading_progress = self.loading_progress.clone();
                                 crate::spawn(async move {
                                     let scene = gltf_loader::load_asset(
                                         url,
                                         &device,
                                         &queue,
                                         target_format,
+                                        loading_progress,
                                     )
                                     .await
                                     .unwrap();
