@@ -25,11 +25,8 @@ mod shaders;
 
 use std::sync::{Arc, Mutex};
 
-use eframe::{
-    egui::ahash::HashMap, wgpu,
-};
+use eframe::wgpu;
 use reqwest::Url;
-use serde::Deserialize;
 use tokio::sync::watch::{Receiver, Sender};
 
 use crate::{
@@ -66,9 +63,6 @@ pub struct SceneRenderer {
 
     pub asset_rx: Receiver<Option<Asset>>,
     pub asset_tx: Sender<Option<Asset>>,
-
-    pub asset_list: Receiver<Vec<ModelLinkInfo>>,
-    pub loading_progress: Arc<Mutex<LoadingProgress>>,
 }
 
 impl SceneRenderer {
@@ -76,47 +70,26 @@ impl SceneRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_format: wgpu::TextureFormat,
+        loading_progress: Arc<Mutex<LoadingProgress>>,
     ) -> Self {
         let camera = ArcBallCamera::new(device);
         let skybox = Skybox::new(device, queue, color_format);
 
         let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
         let asset_tx_clone = asset_tx.clone();
-        let loading_progress = Arc::new(Mutex::new(LoadingProgress {
-            loaded: 1,
-            total: 1,
-        }));
-        {
-            let device = device.clone();
-            let queue = queue.clone();
-            let loading_progress_clone = loading_progress.clone();
-            crate::spawn(async move {
-                let url = Url::parse(ASSETS_BASE_URL)
-                    .unwrap()
-                    .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
-                    .unwrap();
-                let loaded_scene =
-                    asset::load_asset(url, &device, &queue, color_format, loading_progress_clone)
-                        .await
-                        .unwrap();
-                let _ = asset_tx_clone.send(Some(loaded_scene));
-            });
-        }
 
-        // Load the asset list
-
-        let (asset_list_tx, asset_list_rx) = tokio::sync::watch::channel(Vec::new());
+        let device = device.clone();
+        let queue = queue.clone();
         crate::spawn(async move {
             let url = Url::parse(ASSETS_BASE_URL)
                 .unwrap()
-                .join("model-index.json")
+                .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
                 .unwrap();
-            let req: Vec<ModelLinkInfo> = reqwest::get(url).await.unwrap().json().await.unwrap();
-            let req = req
-                .into_iter()
-                .filter(|m| m.tags.iter().any(|t| *t == "core"))
-                .collect();
-            let _ = asset_list_tx.send(req);
+            let loaded_scene =
+                asset::load_asset(url, &device, &queue, color_format, loading_progress)
+                    .await
+                    .unwrap();
+            let _ = asset_tx_clone.send(Some(loaded_scene));
         });
 
         Self {
@@ -126,21 +99,8 @@ impl SceneRenderer {
 
             asset_rx,
             asset_tx,
-
-            asset_list: asset_list_rx,
-            loading_progress,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ModelLinkInfo {
-    label: String,
-    name: String,
-    #[serde(rename = "screenshot")]
-    _screenshot: String,
-    tags: Vec<String>,
-    variants: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
