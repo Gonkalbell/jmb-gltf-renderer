@@ -1,7 +1,7 @@
 //! Since I mostly want to do my own rendering, very little actually happens in the top level `App` struct. Instead,
 //! most of the rendering logic actually happens in `renderer.rs`
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use eframe::{
     egui::{self, RichText, Widget, ahash::HashMap},
@@ -10,7 +10,6 @@ use eframe::{
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
-use tokio::sync::watch::{Receiver, Sender};
 
 use crate::{
     ASSETS_BASE_URL,
@@ -34,29 +33,34 @@ pub struct RendererApp {
 
     skybox: Skybox,
 
-    asset_rx: Receiver<Option<Asset>>,
-    asset_tx: Sender<Option<Asset>>,
+    asset: Arc<RwLock<Option<Asset>>>,
 
-    asset_list: Receiver<Vec<ModelLinkInfo>>,
+    asset_list: Arc<RwLock<Vec<ModelLinkInfo>>>,
     loading_progress: Arc<Mutex<LoadingProgress>>,
 }
 
 impl RendererApp {
     /// Called once before the first frame.
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let (asset_list_tx, asset_list_rx) = tokio::sync::watch::channel(Vec::new());
-        crate::spawn(async move {
-            let url = Url::parse(ASSETS_BASE_URL)
-                .unwrap()
-                .join("model-index.json")
-                .unwrap();
-            let req: Vec<ModelLinkInfo> = reqwest::get(url).await.unwrap().json().await.unwrap();
-            let req = req
-                .into_iter()
-                .filter(|m| m.tags.iter().any(|t| *t == "core"))
-                .collect();
-            let _ = asset_list_tx.send(req);
-        });
+        let asset_list = Arc::new(RwLock::new(Vec::new()));
+        {
+            let asset_list = asset_list.clone();
+            crate::spawn(async move {
+                let url = Url::parse(ASSETS_BASE_URL)
+                    .unwrap()
+                    .join("model-index.json")
+                    .unwrap();
+                let assets: Vec<ModelLinkInfo> =
+                    reqwest::get(url).await.unwrap().json().await.unwrap();
+                let assets = assets
+                    .into_iter()
+                    .filter(|m| m.tags.iter().any(|t| *t == "core"))
+                    .collect();
+                if let Ok(mut writer) = asset_list.write() {
+                    *writer = assets;
+                };
+            });
+        }
 
         let loading_progress = Arc::new(Mutex::new(LoadingProgress {
             loaded: 1,
@@ -79,36 +83,36 @@ impl RendererApp {
         let camera = ArcBallCamera::new(&device);
         let skybox = Skybox::new(&device, &queue, target_format);
 
-        let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
-        let asset_tx_clone = asset_tx.clone();
-
+        let asset = Arc::new(RwLock::new(None));
         {
             let loading_progress = loading_progress.clone();
+            let asset = asset.clone();
             crate::spawn(async move {
                 let url = Url::parse(ASSETS_BASE_URL)
                     .unwrap()
                     .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
                     .unwrap();
-                let loaded_scene =
+                let loaded_asset =
                     asset::load_asset(url, &device, &queue, target_format, loading_progress)
                         .await
                         .unwrap();
-                let _ = asset_tx_clone.send(Some(loaded_scene));
+                if let Ok(mut writer) = asset.write() {
+                    *writer = Some(loaded_asset);
+                };
             });
         }
 
         Self {
             camera,
             skybox,
-            asset_tx,
-            asset_rx,
-            asset_list: asset_list_rx,
+            asset,
+            asset_list,
             loading_progress,
         }
     }
 
     fn show_info_menu(&self, render_state: &eframe::egui_wgpu::RenderState, ui: &mut egui::Ui) {
-        if let Some(asset) = self.asset_rx.borrow().as_ref() {
+        if let Ok(Some(asset)) = self.asset.read().as_deref() {
             ui.menu_button("Asset", |ui| {
                 ui.label(asset.info());
             });
@@ -202,14 +206,15 @@ impl RendererApp {
     }
 
     fn show_scene_menu(&self, render_state: &eframe::egui_wgpu::RenderState, ui: &mut egui::Ui) {
-        let model_list = self.asset_list.borrow();
-        if !model_list.is_empty() {
+        if let Ok(asset_list) = self.asset_list.read().as_deref()
+            && !asset_list.is_empty()
+        {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for model in model_list.iter() {
+                for model in asset_list.iter() {
                     ui.menu_button(&model.label, |ui| {
                         for (variant, file) in &model.variants {
                             if ui.button(variant).clicked() {
-                                let asset_tx = self.asset_tx.clone();
+                                let asset = self.asset.clone();
                                 let egui_wgpu::RenderState {
                                     device,
                                     queue,
@@ -222,7 +227,7 @@ impl RendererApp {
                                     .unwrap();
                                 let loading_progress = self.loading_progress.clone();
                                 crate::spawn(async move {
-                                    let scene = asset::load_asset(
+                                    let loaded_asset = asset::load_asset(
                                         url,
                                         &device,
                                         &queue,
@@ -231,7 +236,9 @@ impl RendererApp {
                                     )
                                     .await
                                     .unwrap();
-                                    let _ = asset_tx.send(Some(scene));
+                                    if let Ok(mut writer) = asset.write() {
+                                        *writer = Some(loaded_asset);
+                                    };
                                 });
                             }
                         }
@@ -290,7 +297,7 @@ impl eframe::App for RendererApp {
                     RenderCallback {
                         camera: self.camera.clone(),
                         skybox: self.skybox.clone(),
-                        asset_rx: self.asset_rx.clone(),
+                        asset: self.asset.clone(),
                     },
                 ));
         });
@@ -310,7 +317,7 @@ struct RenderCallback {
 
     skybox: Skybox,
 
-    asset_rx: Receiver<Option<Asset>>,
+    asset: Arc<RwLock<Option<Asset>>>,
 }
 
 impl CallbackTrait for RenderCallback {
@@ -324,7 +331,7 @@ impl CallbackTrait for RenderCallback {
 
         self.camera.bgroup.set(render_pass);
 
-        if let Some(asset) = self.asset_rx.borrow().as_ref() {
+        if let Ok(Some(asset)) = self.asset.read().as_deref() {
             asset.render(render_pass);
         }
 
