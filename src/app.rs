@@ -257,13 +257,6 @@ impl eframe::App for RendererApp {
             .wgpu_render_state()
             .expect("WGPU is not properly initialized");
 
-        let ctx = ui.ctx();
-        if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
-            ctx.input(|input| {
-                self.camera.params.update(input);
-            });
-        }
-
         egui::Panel::top("top_panel").show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("Asset", |ui| {
@@ -301,6 +294,13 @@ impl eframe::App for RendererApp {
                     },
                 ));
         });
+
+        let ctx = ui.ctx();
+        if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
+            ctx.input(|input| {
+                self.camera.params.update(input);
+            });
+        }
     }
 }
 
