@@ -2,6 +2,7 @@ use wgpu::util::DeviceExt;
 
 use crate::{DEPTH_FORMAT, bind_groups, shaders::skybox};
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct Skybox {
     skybox_bgroup: bind_groups::Skybox,
     skybox_pipeline: wgpu::RenderPipeline,

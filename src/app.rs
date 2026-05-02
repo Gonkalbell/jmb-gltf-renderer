@@ -5,16 +5,18 @@ use std::sync::{Arc, Mutex};
 
 use eframe::{
     egui::{self, RichText, Widget, ahash::HashMap},
-    egui_wgpu::{self, CallbackTrait},
+    egui_wgpu::{self, CallbackTrait, RenderState},
 };
 use puffin::profile_function;
 use reqwest::Url;
 use serde::Deserialize;
-use tokio::sync::watch::Receiver;
+use tokio::sync::watch::{Receiver, Sender};
 
 use crate::{
-    ASSETS_BASE_URL, SceneRenderer,
-    asset::{self, LoadingProgress},
+    ASSETS_BASE_URL,
+    asset::{self, Asset, LoadingProgress},
+    camera::ArcBallCamera,
+    skybox::Skybox,
 };
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +30,13 @@ pub struct ModelLinkInfo {
 }
 
 pub struct RendererApp {
+    camera: ArcBallCamera,
+
+    skybox: Skybox,
+
+    asset_rx: Receiver<Option<Asset>>,
+    asset_tx: Sender<Option<Asset>>,
+
     asset_list: Receiver<Vec<ModelLinkInfo>>,
     loading_progress: Arc<Mutex<LoadingProgress>>,
 }
@@ -59,30 +68,47 @@ impl RendererApp {
             .wgpu_render_state
             .as_ref()
             .expect("WGPU is not properly initialized");
-        wgpu_render_state
-            .renderer
-            .write()
-            .callback_resources
-            .insert(SceneRenderer::init(
-                &wgpu_render_state.device,
-                &wgpu_render_state.queue,
-                wgpu_render_state.target_format,
-                loading_progress.clone(),
-            ));
+
+        let RenderState {
+            device,
+            queue,
+            target_format,
+            ..
+        } = wgpu_render_state.clone();
+
+        let camera = ArcBallCamera::new(&device);
+        let skybox = Skybox::new(&device, &queue, target_format);
+
+        let (asset_tx, asset_rx) = tokio::sync::watch::channel(None);
+        let asset_tx_clone = asset_tx.clone();
+
+        {
+            let loading_progress = loading_progress.clone();
+            crate::spawn(async move {
+                let url = Url::parse(ASSETS_BASE_URL)
+                    .unwrap()
+                    .join("AntiqueCamera/glTF-Binary/AntiqueCamera.glb")
+                    .unwrap();
+                let loaded_scene =
+                    asset::load_asset(url, &device, &queue, target_format, loading_progress)
+                        .await
+                        .unwrap();
+                let _ = asset_tx_clone.send(Some(loaded_scene));
+            });
+        }
 
         Self {
+            camera,
+            skybox,
+            asset_tx,
+            asset_rx,
             asset_list: asset_list_rx,
             loading_progress,
         }
     }
 
-    fn show_info_menu(
-        &self,
-        render_state: &eframe::egui_wgpu::RenderState,
-        ui: &mut egui::Ui,
-        renderer: &mut SceneRenderer,
-    ) {
-        if let Some(asset) = renderer.asset_rx.borrow().as_ref() {
+    fn show_info_menu(&self, render_state: &eframe::egui_wgpu::RenderState, ui: &mut egui::Ui) {
+        if let Some(asset) = self.asset_rx.borrow().as_ref() {
             ui.menu_button("Asset", |ui| {
                 ui.label(asset.info());
             });
@@ -175,12 +201,7 @@ impl RendererApp {
         }
     }
 
-    fn show_scene_menu(
-        &self,
-        render_state: &eframe::egui_wgpu::RenderState,
-        ui: &mut egui::Ui,
-        renderer: &mut SceneRenderer,
-    ) {
+    fn show_scene_menu(&self, render_state: &eframe::egui_wgpu::RenderState, ui: &mut egui::Ui) {
         let model_list = self.asset_list.borrow();
         if !model_list.is_empty() {
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -188,7 +209,7 @@ impl RendererApp {
                     ui.menu_button(&model.label, |ui| {
                         for (variant, file) in &model.variants {
                             if ui.button(variant).clicked() {
-                                let asset_tx = renderer.asset_tx.clone();
+                                let asset_tx = self.asset_tx.clone();
                                 let egui_wgpu::RenderState {
                                     device,
                                     queue,
@@ -228,54 +249,49 @@ impl eframe::App for RendererApp {
         let render_state = frame
             .wgpu_render_state()
             .expect("WGPU is not properly initialized");
-        if let Some(renderer) = render_state
-            .renderer
-            .write()
-            .callback_resources
-            .get_mut::<SceneRenderer>()
-        {
-            {
-                let ctx = ui.ctx();
-                if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
-                    ctx.input(|input| {
-                        renderer.camera.params.update(input);
-                    });
-                }
 
-                egui::Panel::top("top_panel").show_inside(ui, |ui| {
-                    egui::MenuBar::new().ui(ui, |ui| {
-                        ui.menu_button("Asset", |ui| {
-                            self.show_scene_menu(render_state, ui, renderer);
-                        });
-
-                        ui.menu_button("Camera", |ui| renderer.camera.params.run_ui(ui));
-
-                        ui.menu_button("Info", |ui| {
-                            self.show_info_menu(render_state, ui, renderer);
-                        });
-                        if let Ok(loading_progress) = self.loading_progress.try_lock()
-                            && loading_progress.loaded != loading_progress.total
-                        {
-                            let progress =
-                                loading_progress.loaded as f32 / loading_progress.total as f32;
-                            egui::ProgressBar::new(progress)
-                                .text(format!(
-                                    "loading {} / {}",
-                                    loading_progress.loaded, loading_progress.total
-                                ))
-                                .animate(true)
-                                .ui(ui);
-                        }
-                    });
-                });
-            };
+        let ctx = ui.ctx();
+        if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
+            ctx.input(|input| {
+                self.camera.params.update(input);
+            });
         }
+
+        egui::Panel::top("top_panel").show_inside(ui, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("Asset", |ui| {
+                    self.show_scene_menu(render_state, ui);
+                });
+
+                ui.menu_button("Camera", |ui| self.camera.params.run_ui(ui));
+
+                ui.menu_button("Info", |ui| {
+                    self.show_info_menu(render_state, ui);
+                });
+                if let Ok(loading_progress) = self.loading_progress.try_lock()
+                    && loading_progress.loaded != loading_progress.total
+                {
+                    let progress = loading_progress.loaded as f32 / loading_progress.total as f32;
+                    egui::ProgressBar::new(progress)
+                        .text(format!(
+                            "loading {} / {}",
+                            loading_progress.loaded, loading_progress.total
+                        ))
+                        .animate(true)
+                        .ui(ui);
+                }
+            });
+        });
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             ui.painter()
                 .add(eframe::egui_wgpu::Callback::new_paint_callback(
                     ui.viewport_rect(),
-                    RenderCallback,
+                    RenderCallback {
+                        camera: self.camera.clone(),
+                        skybox: self.skybox.clone(),
+                        asset_rx: self.asset_rx.clone(),
+                    },
                 ));
         });
     }
@@ -289,29 +305,30 @@ impl eframe::App for RendererApp {
 //     `wgpu::RenderPass`s that all target the `wgpu::SurfaceTexture`
 //   - `CustomCallback` must be recreated every frame. In fact `new_paint_callback` allocates a new Arc every frame.
 // If any of these become a deal breaker, I may consider just using `winit` and `egui` directly. .
-struct RenderCallback;
+struct RenderCallback {
+    camera: ArcBallCamera,
+
+    skybox: Skybox,
+
+    asset_rx: Receiver<Option<Asset>>,
+}
 
 impl CallbackTrait for RenderCallback {
     fn paint(
         &self,
         _info: egui::PaintCallbackInfo,
         render_pass: &mut wgpu::RenderPass<'static>,
-        callback_resources: &eframe::egui_wgpu::CallbackResources,
+        _callback_resources: &eframe::egui_wgpu::CallbackResources,
     ) {
-        if let Some(renderer) = callback_resources.get::<SceneRenderer>() {
-            {
-                let this = &renderer;
-                profile_function!();
+        profile_function!();
 
-                this.camera.bgroup.set(render_pass);
+        self.camera.bgroup.set(render_pass);
 
-                if let Some(asset) = this.asset_rx.borrow().as_ref() {
-                    asset.render(render_pass);
-                }
-
-                this.skybox.render(render_pass);
-            };
+        if let Some(asset) = self.asset_rx.borrow().as_ref() {
+            asset.render(render_pass);
         }
+
+        self.skybox.render(render_pass);
     }
 
     fn prepare(
@@ -320,16 +337,10 @@ impl CallbackTrait for RenderCallback {
         queue: &eframe::wgpu::Queue,
         _screen_descriptor: &eframe::egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut eframe::wgpu::CommandEncoder,
-        callback_resources: &mut eframe::egui_wgpu::CallbackResources,
+        _callback_resources: &mut eframe::egui_wgpu::CallbackResources,
     ) -> Vec<eframe::wgpu::CommandBuffer> {
         profile_function!();
-        if let Some(renderer) = callback_resources.get::<SceneRenderer>() {
-            return Vec::from_iter({
-                renderer.camera.update_buffer(queue);
-
-                None
-            });
-        }
+        self.camera.update_buffer(queue);
         Vec::new()
     }
 }

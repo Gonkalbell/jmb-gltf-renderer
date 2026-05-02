@@ -7,6 +7,7 @@ use wgpu::util::DeviceExt;
 
 use crate::{bind_groups, shaders::bgroup_camera};
 
+#[derive(Debug, Clone, PartialEq)]
 pub struct ArcBallCamera {
     pub params: ArcBallCameraParams,
     pub bgroup: bind_groups::Camera,
