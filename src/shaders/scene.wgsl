@@ -16,21 +16,26 @@ struct Instance {
 @group(2) @binding(0) var<storage> res_instances: array<Instance>;
 
 struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) normal: vec3<f32>,
-    @location(2) tangent: vec4<f32>,
-    @location(3) texcoord_0: vec2<f32>,
-    @location(4) texcoord_1: vec2<f32>,
-    @location(5) color_0: vec4<f32>,
-    @location(6) color_1: vec4<f32>,
-    // @location(7) joints_0: vec4<f32>,
-    // @location(8) joints_1: vec4<f32>,
+    @location(0) position: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) tangent: vec4f,
+    @location(3) texcoord_0: vec2f,
+    @location(4) texcoord_1: vec2f,
+    @location(5) color_0: vec4f,
+    @location(6) color_1: vec4f,
+    // @location(7) joints_0: vec4f,
+    // @location(8) joints_1: vec4f,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
     @location(0) view_position: vec4f,
     @location(1) normal: vec3f,
+    @location(2) tangent: vec3f,
+    @location(3) texcoord_0: vec2f,
+    @location(4) texcoord_1: vec2f,
+    @location(5) color_0: vec4f,
+    @location(6) color_1: vec4f,
 };
 
 @vertex
@@ -38,19 +43,32 @@ fn vs_scene(@builtin(instance_index) instance_index: u32, input: VertexInput) ->
     var output: VertexOutput;
     var instance = res_instances[instance_index];
     output.position = res_camera.world_to_proj * instance.local_to_world * vec4f(input.position, 1);
-    output.normal = (res_camera.world_to_local * instance.normal_local_to_world * vec4f(input.normal, 0)).xyz;
-
     output.view_position = res_camera.world_to_local * instance.local_to_world * vec4f(input.position, 1);
+    output.normal = (res_camera.world_to_local * instance.normal_local_to_world * vec4f(input.normal, 0)).xyz;
+    output.tangent = (res_camera.world_to_local * instance.normal_local_to_world * vec4f(input.tangent.xyz, 0)).xyz;
+
+    output.texcoord_0 = input.texcoord_0;
+    output.texcoord_1 = input.texcoord_1;
+
+    output.color_0 = input.color_0;
+    output.color_1 = input.color_1;
 
     return output;
 }
 
 // Some hardcoded lighting
 const LIGHT_DIR = vec3f(0.25, 0.5, 1);
+const LIGHT_COLOR = vec3f(1);
 const AMBIENT_COLOR = vec3f(0.1);
 
 @fragment
-fn fs_scene(input: VertexOutput) -> @location(0) vec4f {
+fn fs_scene(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4f {
+    let base_color = input.color_0 * textureSample(base_color_texture, base_color_sampler, input.texcoord_0) * material_data.base_color_factor;
+
+    if (base_color.a < material_data.alpha_cutoff) {
+        discard;
+    }
+
     // An extremely simple directional lighting model, just to give our model some shape.
     var N = input.normal;
 
@@ -62,10 +80,10 @@ fn fs_scene(input: VertexOutput) -> @location(0) vec4f {
         N = cross(dy, dx);
     }
 
-    N = normalize(N);
+    N = select(-1., 1., front_facing) * normalize(N);
     let L = normalize(LIGHT_DIR);
     let NDotL = max(dot(N, L), 0.0);
-    let surface_color = AMBIENT_COLOR + NDotL;
+    let surface_color = (base_color.rgb * AMBIENT_COLOR) + (base_color.rgb * NDotL);
 
-    return vec4f((1.f + N) / 2.f, 1);
+    return vec4f(surface_color, base_color.a);
 }

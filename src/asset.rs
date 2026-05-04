@@ -182,7 +182,7 @@ pub async fn load_asset(
                     WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
                     WrappingMode::Repeat => wgpu::AddressMode::Repeat,
                 },
-                address_mode_v: match doc_sampler.wrap_s() {
+                address_mode_v: match doc_sampler.wrap_t() {
                     WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
                     WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
                     WrappingMode::Repeat => wgpu::AddressMode::Repeat,
@@ -234,7 +234,7 @@ pub async fn load_asset(
             view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         },
         Default::default(),
-        &[0, 0, 0, 0],
+        &[0xFF, 0xFF, 0xFF, 0xFF],
     );
     let default_sampler = device.create_sampler(&Default::default());
 

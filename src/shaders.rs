@@ -2,7 +2,7 @@
 //
 // ^ wgsl_bindgen version 0.22.2
 // Changes made to this file will not be saved.
-// SourceHash: 50a543e09f621d0386d2682a92bc39c77854bd853cb0842ae6d5a0f8996eaee2
+// SourceHash: 1c16378056e28a2fe9090552d2df992c90cad12552035c6e35fcf234de7c90a6
 
 #![allow(unused, non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -651,9 +651,15 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) view_position: vec4<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) tangent: vec3<f32>,
+    @location(3) texcoord_0_: vec2<f32>,
+    @location(4) texcoord_1_: vec2<f32>,
+    @location(5) color_0_: vec4<f32>,
+    @location(6) color_1_: vec4<f32>,
 }
 
 const LIGHT_DIR: vec3<f32> = vec3<f32>(0.25f, 0.5f, 1f);
+const LIGHT_COLOR: vec3<f32> = vec3(1f);
 const AMBIENT_COLOR: vec3<f32> = vec3(0.1f);
 
 @group(0) @binding(0) 
@@ -678,35 +684,48 @@ fn vs_scene(@builtin(instance_index) instance_index: u32, input: VertexInput) ->
     let _e12 = instance.local_to_world;
     output.position = ((_e10 * _e12) * vec4<f32>(input.position, 1f));
     let _e21 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
-    let _e23 = instance.normal_local_to_world;
-    output.normal = ((_e21 * _e23) * vec4<f32>(input.normal, 0f)).xyz;
-    let _e33 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
-    let _e35 = instance.local_to_world;
-    output.view_position = ((_e33 * _e35) * vec4<f32>(input.position, 1f));
-    let _e41 = output;
-    return _e41;
+    let _e23 = instance.local_to_world;
+    output.view_position = ((_e21 * _e23) * vec4<f32>(input.position, 1f));
+    let _e32 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
+    let _e34 = instance.normal_local_to_world;
+    output.normal = ((_e32 * _e34) * vec4<f32>(input.normal, 0f)).xyz;
+    let _e44 = res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX.world_to_local;
+    let _e46 = instance.normal_local_to_world;
+    output.tangent = ((_e44 * _e46) * vec4<f32>(input.tangent.xyz, 0f)).xyz;
+    output.texcoord_0_ = input.texcoord_0_;
+    output.texcoord_1_ = input.texcoord_1_;
+    output.color_0_ = input.color_0_;
+    output.color_1_ = input.color_1_;
+    let _e62 = output;
+    return _e62;
 }
 
 @fragment 
-fn fs_scene(input_1: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_scene(input_1: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     var N: vec3<f32>;
 
+    let _e5 = textureSample(base_color_texture, base_color_sampler, input_1.texcoord_0_);
+    let _e9 = material_data.base_color_factor;
+    let base_color = ((input_1.color_0_ * _e5) * _e9);
+    let _e14 = material_data.alpha_cutoff;
+    if (base_color.w < _e14) {
+        discard;
+    }
     N = input_1.normal;
-    let _e3 = N;
-    if all((_e3 == vec3(0f))) {
+    let _e18 = N;
+    if all((_e18 == vec3(0f))) {
         let view_position = input_1.view_position.xyz;
         let dx = dpdx(view_position);
         let dy = dpdy(view_position);
         N = cross(dy, dx);
     }
-    let _e13 = N;
-    N = normalize(_e13);
+    let _e32 = N;
+    N = (select(-1f, 1f, front_facing) * normalize(_e32));
     let L = vec3<f32>(0.21821788f, 0.43643576f, 0.8728715f);
-    let _e19 = N;
-    let NDotL = max(dot(_e19, L), 0f);
-    let surface_color = (AMBIENT_COLOR + vec3(NDotL));
-    let _e27 = N;
-    return vec4<f32>(((vec3(1f) + _e27) / vec3(2f)), 1f);
+    let _e39 = N;
+    let NDotL = max(dot(_e39, L), 0f);
+    let surface_color = ((base_color.xyz * AMBIENT_COLOR) + (base_color.xyz * NDotL));
+    return vec4<f32>(surface_color, base_color.w);
 }
 "#;
 }
