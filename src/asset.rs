@@ -12,11 +12,9 @@ use std::{
 };
 
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
-use gltf::mesh::Mode;
 use image::DynamicImage;
 use reqwest::Url;
 use wgpu::util::DeviceExt;
-use wgpu::wgt::TextureViewDescriptor;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct OwnedVertexBufferLayout {
@@ -33,7 +31,7 @@ struct PipelineCacheKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asset {
     info: String,
-    batches: Vec<RenderBatch>,
+    pipeline_batches: Vec<PipelineBatch>,
     instance_bgroup: bind_groups::Instance,
 }
 
@@ -45,22 +43,29 @@ impl Asset {
     pub fn render(&self, rpass: &mut wgpu::RenderPass<'_>) {
         self.instance_bgroup.set(rpass);
 
-        for batch in self.batches.iter() {
-            rpass.set_pipeline(&batch.pipeline);
+        for pipeline_batch in self.pipeline_batches.iter() {
+            rpass.set_pipeline(&pipeline_batch.pipeline);
 
-            for primitive in batch.mesh_primitives.iter() {
-                for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
-                    rpass.set_vertex_buffer(i as _, attrib.as_slice());
-                }
+            for material_batch in pipeline_batch.material_batches.iter() {
+                material_batch.material.set(rpass);
 
-                if let Some(index_data) = &primitive.index_data {
-                    rpass.set_index_buffer(index_data.buffer_slice.as_slice(), index_data.format);
-                }
+                for primitive in material_batch.mesh_primitives.iter() {
+                    for (i, attrib) in primitive.attrib_buffers.iter().enumerate() {
+                        rpass.set_vertex_buffer(i as _, attrib.as_slice());
+                    }
 
-                if primitive.index_data.is_none() {
-                    rpass.draw(0..primitive.draw_count, primitive.instances.clone());
-                } else {
-                    rpass.draw_indexed(0..primitive.draw_count, 0, primitive.instances.clone());
+                    if let Some(index_data) = &primitive.index_data {
+                        rpass.set_index_buffer(
+                            index_data.buffer_slice.as_slice(),
+                            index_data.format,
+                        );
+                    }
+
+                    if primitive.index_data.is_none() {
+                        rpass.draw(0..primitive.draw_count, primitive.instances.clone());
+                    } else {
+                        rpass.draw_indexed(0..primitive.draw_count, 0, primitive.instances.clone());
+                    }
                 }
             }
         }
@@ -68,13 +73,19 @@ impl Asset {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RenderBatch {
+struct PipelineBatch {
     pipeline: wgpu::RenderPipeline,
-    mesh_primitives: Vec<Primitive>,
+    material_batches: Vec<MaterialBatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Primitive {
+struct MaterialBatch {
+    material: bind_groups::Material,
+    mesh_primitives: Vec<MeshPrimitive>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MeshPrimitive {
     attrib_buffers: Vec<OwnedBufferSlice>,
     draw_count: u32,
     index_data: Option<PrimitiveIndexData>,
@@ -149,7 +160,190 @@ pub async fn load_asset(
         })
         .collect();
 
-    let _textures = futures::future::try_join_all(doc.images().map(|doc_image| {
+    let textures = generate_textures(
+        &url,
+        device,
+        queue,
+        &loading_progress,
+        &doc,
+        &buffer_contents,
+    )
+    .await?;
+
+    let samplers: Vec<_> = doc
+        .samplers()
+        .map(|doc_sampler| {
+            use gltf::texture::{MagFilter, MinFilter, WrappingMode};
+
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: doc_sampler.name(),
+                address_mode_u: match doc_sampler.wrap_s() {
+                    WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+                    WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
+                    WrappingMode::Repeat => wgpu::AddressMode::Repeat,
+                },
+                address_mode_v: match doc_sampler.wrap_s() {
+                    WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+                    WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
+                    WrappingMode::Repeat => wgpu::AddressMode::Repeat,
+                },
+                mag_filter: match doc_sampler.mag_filter() {
+                    Some(MagFilter::Nearest) => wgpu::FilterMode::Nearest,
+                    Some(MagFilter::Linear) | None => wgpu::FilterMode::Linear,
+                },
+                min_filter: match doc_sampler.min_filter() {
+                    Some(
+                        MinFilter::Nearest
+                        | MinFilter::NearestMipmapLinear
+                        | MinFilter::NearestMipmapNearest,
+                    ) => wgpu::FilterMode::Nearest,
+                    None
+                    | Some(
+                        MinFilter::Linear
+                        | MinFilter::LinearMipmapLinear
+                        | MinFilter::LinearMipmapNearest,
+                    ) => wgpu::FilterMode::Linear,
+                },
+                mipmap_filter: match doc_sampler.min_filter() {
+                    Some(
+                        MinFilter::Nearest
+                        | MinFilter::LinearMipmapNearest
+                        | MinFilter::NearestMipmapNearest,
+                    ) => wgpu::MipmapFilterMode::Nearest,
+                    _ => wgpu::MipmapFilterMode::Linear,
+                },
+                ..Default::default()
+            })
+        })
+        .collect();
+
+    let default_texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: Some("default texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+        },
+        Default::default(),
+        &[0, 0, 0, 0],
+    );
+    let default_sampler = device.create_sampler(&Default::default());
+
+    let defualt_material_data = scene::Material {
+        base_color_factor: glam::Vec4::ONE,
+        alpha_cutoff: 0.,
+        _pad_alpha_cutoff: Default::default(),
+    };
+    let default_material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Material Data"),
+        contents: bytemuck::bytes_of(&defualt_material_data),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+    });
+    let default_material_bgroup = bind_groups::Material::from_bindings(
+        device,
+        bind_groups::MaterialEntries::new(bind_groups::MaterialEntriesParams {
+            material_data: default_material_buffer.as_entire_buffer_binding(),
+            base_color_texture: &default_texture.create_view(&Default::default()),
+            base_color_sampler: &default_sampler,
+        }),
+    );
+
+    let materials = generate_materials(
+        device,
+        &doc,
+        &textures,
+        &samplers,
+        &default_texture,
+        &default_sampler,
+    );
+
+    let (instance_bgroup, mesh_instances) = generate_nodes(device, &doc);
+
+    let pipeline_batches = generate_meshes(
+        device,
+        &doc,
+        color_format,
+        &buffer_slices,
+        &mesh_instances,
+        &materials,
+        &default_material_bgroup,
+    );
+
+    let mut asset_info = String::new();
+    let json_asset = &doc.as_json().asset;
+    writeln!(&mut asset_info, "version: {}", json_asset.version)?;
+    if let Some(min_version) = &json_asset.min_version {
+        writeln!(&mut asset_info, "min_version: {}", min_version)?;
+    }
+    if let Some(copyright) = &json_asset.copyright {
+        writeln!(&mut asset_info, "copyright: {}", copyright)?;
+    }
+    if let Some(generator) = &json_asset.generator {
+        writeln!(&mut asset_info, "generator: {}", generator)?;
+    }
+
+    if let Ok(mut loading_progress) = loading_progress.lock() {
+        loading_progress.loaded = loading_progress.total;
+    }
+
+    log::info!("finished loading {}", &url);
+    Ok(Asset {
+        info: asset_info,
+        pipeline_batches,
+        instance_bgroup,
+    })
+}
+
+async fn request_data(
+    url: &Url,
+    loading_progress: Arc<Mutex<LoadingProgress>>,
+) -> anyhow::Result<Vec<u8>> {
+    if let Ok(mut loading_progress) = loading_progress.lock() {
+        loading_progress.total += 1;
+    }
+    let data = match url.scheme() {
+        "http" | "https" => reqwest::get(url.clone()).await?.bytes().await?.to_vec(),
+        #[cfg(not(target_family = "wasm"))]
+        "file" => {
+            let path = url
+                .to_file_path()
+                .map_err(|_| anyhow::anyhow!("Invalid file URL"))?;
+            tokio::fs::read(path).await?
+        }
+        "data" => {
+            let data_url =
+                data_url::DataUrl::process(url.as_str()).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            let (data, _) = data_url
+                .decode_to_vec()
+                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+            data
+        }
+        other => anyhow::bail!("Unsupported scheme: {}", other),
+    };
+    if let Ok(mut loading_progress) = loading_progress.lock() {
+        loading_progress.loaded += 1;
+    }
+    Ok(data)
+}
+
+async fn generate_textures(
+    url: &Url,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    loading_progress: &Arc<Mutex<LoadingProgress>>,
+    doc: &gltf::Document,
+    buffer_contents: &[Vec<u8>],
+) -> Result<Vec<wgpu::Texture>, anyhow::Error> {
+    futures::future::try_join_all(doc.images().map(|doc_image| {
         use gltf::image::Source;
         let source = doc_image.source();
         async {
@@ -236,12 +430,12 @@ pub async fn load_asset(
                 blitter.copy(
                     device,
                     &mut encoder,
-                    &texture.create_view(&TextureViewDescriptor {
+                    &texture.create_view(&wgpu::TextureViewDescriptor {
                         base_mip_level: base_mip_level - 1,
                         mip_level_count: Some(1),
                         ..Default::default()
                     }),
-                    &texture.create_view(&TextureViewDescriptor {
+                    &texture.create_view(&wgpu::TextureViewDescriptor {
                         base_mip_level,
                         mip_level_count: Some(1),
                         ..Default::default()
@@ -251,118 +445,58 @@ pub async fn load_asset(
 
             queue.submit([encoder.finish()]);
 
-            Ok::<_, anyhow::Error>(dynamic_image)
+            Ok::<_, anyhow::Error>(texture)
         }
     }))
-    .await?;
-
-    let samplers: Vec<_> = doc
-        .samplers()
-        .map(|doc_sampler| {
-            use gltf::texture::{MagFilter, MinFilter, WrappingMode};
-
-            device.create_sampler(&wgpu::SamplerDescriptor {
-                label: doc_sampler.name(),
-                address_mode_u: match doc_sampler.wrap_s() {
-                    WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
-                    WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
-                    WrappingMode::Repeat => wgpu::AddressMode::Repeat,
-                },
-                address_mode_v: match doc_sampler.wrap_s() {
-                    WrappingMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
-                    WrappingMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
-                    WrappingMode::Repeat => wgpu::AddressMode::Repeat,
-                },
-                mag_filter: match doc_sampler.mag_filter() {
-                    Some(MagFilter::Nearest) => wgpu::FilterMode::Nearest,
-                    Some(MagFilter::Linear) | None => wgpu::FilterMode::Linear,
-                },
-                min_filter: match doc_sampler.min_filter() {
-                    Some(
-                        MinFilter::Nearest
-                        | MinFilter::NearestMipmapLinear
-                        | MinFilter::NearestMipmapNearest,
-                    ) => wgpu::FilterMode::Nearest,
-                    None
-                    | Some(
-                        MinFilter::Linear
-                        | MinFilter::LinearMipmapLinear
-                        | MinFilter::LinearMipmapNearest,
-                    ) => wgpu::FilterMode::Linear,
-                },
-                mipmap_filter: match doc_sampler.min_filter() {
-                    Some(
-                        MinFilter::Nearest
-                        | MinFilter::LinearMipmapNearest
-                        | MinFilter::NearestMipmapNearest,
-                    ) => wgpu::MipmapFilterMode::Nearest,
-                    _ => wgpu::MipmapFilterMode::Linear,
-                },
-                ..Default::default()
-            })
-        })
-        .collect();
-    let _ = samplers;
-
-    let (instance_bgroup, mesh_instances) = generate_nodes(device, &doc);
-
-    let batches = generate_meshes(device, &doc, color_format, &buffer_slices, &mesh_instances);
-
-    let mut asset_info = String::new();
-    let json_asset = &doc.as_json().asset;
-    writeln!(&mut asset_info, "version: {}", json_asset.version)?;
-    if let Some(min_version) = &json_asset.min_version {
-        writeln!(&mut asset_info, "min_version: {}", min_version)?;
-    }
-    if let Some(copyright) = &json_asset.copyright {
-        writeln!(&mut asset_info, "copyright: {}", copyright)?;
-    }
-    if let Some(generator) = &json_asset.generator {
-        writeln!(&mut asset_info, "generator: {}", generator)?;
-    }
-
-    if let Ok(mut loading_progress) = loading_progress.lock() {
-        loading_progress.loaded = loading_progress.total;
-    }
-
-    log::info!("finished loading {}", &url);
-    Ok(Asset {
-        info: asset_info,
-        batches,
-        instance_bgroup,
-    })
+    .await
 }
 
-async fn request_data(
-    url: &Url,
-    loading_progress: Arc<Mutex<LoadingProgress>>,
-) -> anyhow::Result<Vec<u8>> {
-    if let Ok(mut loading_progress) = loading_progress.lock() {
-        loading_progress.total += 1;
-    }
-    let data = match url.scheme() {
-        "http" | "https" => reqwest::get(url.clone()).await?.bytes().await?.to_vec(),
-        #[cfg(not(target_family = "wasm"))]
-        "file" => {
-            let path = url
-                .to_file_path()
-                .map_err(|_| anyhow::anyhow!("Invalid file URL"))?;
-            tokio::fs::read(path).await?
-        }
-        "data" => {
-            let data_url =
-                data_url::DataUrl::process(url.as_str()).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-            let (data, _) = data_url
-                .decode_to_vec()
-                .map_err(|e| anyhow::anyhow!("{:?}", e))?;
-            data
-        }
-        other => anyhow::bail!("Unsupported scheme: {}", other),
-    };
-    if let Ok(mut loading_progress) = loading_progress.lock() {
-        loading_progress.loaded += 1;
-    }
-    Ok(data)
+fn generate_materials(
+    device: &wgpu::Device,
+    doc: &gltf::Document,
+    textures: &[wgpu::Texture],
+    samplers: &[wgpu::Sampler],
+    default_texture: &wgpu::Texture,
+    default_sampler: &wgpu::Sampler,
+) -> Vec<bind_groups::Material> {
+    doc.materials()
+        .map(|doc_material| {
+            let material_data = scene::Material {
+                base_color_factor: glam::Vec4::from(
+                    doc_material.pbr_metallic_roughness().base_color_factor(),
+                ),
+                alpha_cutoff: doc_material.alpha_cutoff().unwrap_or(0.),
+                _pad_alpha_cutoff: Default::default(),
+            };
+            let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Material Data"),
+                contents: bytemuck::bytes_of(&material_data),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+            });
+
+            let doc_texture = doc_material
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|t| t.texture());
+            let base_color_texture = &doc_texture
+                .as_ref()
+                .map(|t| &textures[t.source().index()])
+                .unwrap_or(default_texture)
+                .create_view(&Default::default());
+            let base_color_sampler = doc_texture
+                .and_then(|t| t.sampler().index())
+                .map(|index| &samplers[index])
+                .unwrap_or(default_sampler);
+            bind_groups::Material::from_bindings(
+                device,
+                bind_groups::MaterialEntries::new(bind_groups::MaterialEntriesParams {
+                    material_data: material_buffer.as_entire_buffer_binding(),
+                    base_color_texture,
+                    base_color_sampler,
+                }),
+            )
+        })
+        .collect()
 }
 
 #[derive(Hash, Eq, PartialEq, PartialOrd, Ord)]
@@ -457,9 +591,12 @@ fn generate_meshes(
     color_format: wgpu::TextureFormat,
     buffer_slices: &[wgpu::BufferSlice],
     mesh_instances: &HashMap<MeshIndex, Range<u32>>,
-) -> Vec<RenderBatch> {
+    materials: &[bind_groups::Material],
+    default_material_bgroup: &bind_groups::Material,
+) -> Vec<PipelineBatch> {
+    use gltf::mesh::Mode;
+
     let shader = scene::create_shader_module_embed_source(device);
-    let mut batches = HashMap::new();
 
     let default_vertex_input = VertexInput {
         position: Default::default(),
@@ -500,6 +637,7 @@ fn generate_meshes(
     let default_attributes: HashMap<gltf::Semantic, (OwnedBufferSlice, OwnedVertexBufferLayout)> =
         HashMap::from_iter(semantics.into_iter().zip(default_buf_and_layout_iter));
 
+    let mut pipeline_batches = HashMap::new();
     for doc_mesh in doc.meshes() {
         for doc_primitive in doc_mesh.primitives() {
             let vertex_count = doc_primitive
@@ -560,7 +698,11 @@ fn generate_meshes(
                     Mode::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
                     mode => unimplemented!("format {:?} not supported", mode),
                 },
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: if doc_primitive.material().double_sided() {
+                    None
+                } else {
+                    Some(wgpu::Face::Back)
+                },
                 front_face: wgpu::FrontFace::Ccw,
                 ..Default::default()
             };
@@ -586,15 +728,37 @@ fn generate_meshes(
                 }
             });
 
-            let batch = batches.entry(key).or_insert_with_key(|key| {
-                create_render_batch(device, color_format, &shader, None, key)
-            });
             let instances = mesh_instances
                 .get(&MeshIndex(doc_mesh.index()))
                 .unwrap()
                 .clone();
 
-            batch.mesh_primitives.push(Primitive {
+            let pipeline_batch = pipeline_batches.entry(key).or_insert_with_key(|key| {
+                let pipeline = create_pipeline(device, color_format, &shader, None, key);
+                PipelineBatch {
+                    pipeline,
+                    material_batches: Vec::new(),
+                }
+            });
+
+            let material_bgroup = doc_primitive
+                .material()
+                .index()
+                .map(|i| materials[i].clone())
+                .unwrap_or_else(|| default_material_bgroup.clone());
+            let material_batch = pipeline_batch
+                .material_batches
+                .iter_mut()
+                .find(|b| b.material == material_bgroup);
+            let material_batch = match material_batch {
+                Some(b) => b,
+                None => pipeline_batch.material_batches.push_mut(MaterialBatch {
+                    material: material_bgroup,
+                    mesh_primitives: Vec::new(),
+                }),
+            };
+
+            material_batch.mesh_primitives.push(MeshPrimitive {
                 attrib_buffers,
                 draw_count,
                 index_data,
@@ -603,16 +767,16 @@ fn generate_meshes(
         }
     }
 
-    batches.into_values().collect()
+    pipeline_batches.into_values().collect()
 }
 
-fn create_render_batch(
+fn create_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
     shader: &wgpu::ShaderModule,
     label: Option<&str>,
     key: &PipelineCacheKey,
-) -> RenderBatch {
+) -> wgpu::RenderPipeline {
     let attrib_buffer_layouts: Vec<_> = key
         .attributes
         .iter()
@@ -628,7 +792,7 @@ fn create_render_batch(
         )
         .collect();
 
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label,
         layout: Some(&scene::create_pipeline_layout(device)),
         vertex: wgpu::VertexState {
@@ -652,12 +816,7 @@ fn create_render_batch(
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
-    });
-
-    RenderBatch {
-        pipeline,
-        mesh_primitives: Vec::new(),
-    }
+    })
 }
 
 fn get_vertex_format(accessor: &gltf::Accessor) -> wgpu::VertexFormat {

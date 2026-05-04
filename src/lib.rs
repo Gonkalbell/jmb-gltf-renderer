@@ -34,9 +34,13 @@ pub mod bind_groups {
     pub type CameraEntries<'a> = bgroup_camera::WgpuBindGroup0Entries<'a>;
     pub type CameraEntriesParams<'a> = bgroup_camera::WgpuBindGroup0EntriesParams<'a>;
 
-    pub type Instance = scene::WgpuBindGroup1;
-    pub type InstanceEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
-    pub type InstanceEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
+    pub type Material = scene::WgpuBindGroup1;
+    pub type MaterialEntries<'a> = scene::WgpuBindGroup1Entries<'a>;
+    pub type MaterialEntriesParams<'a> = scene::WgpuBindGroup1EntriesParams<'a>;
+
+    pub type Instance = scene::WgpuBindGroup2;
+    pub type InstanceEntries<'a> = scene::WgpuBindGroup2Entries<'a>;
+    pub type InstanceEntriesParams<'a> = scene::WgpuBindGroup2EntriesParams<'a>;
 
     pub type Skybox = skybox::WgpuBindGroup1;
     pub type SkyboxEntries<'a> = skybox::WgpuBindGroup1Entries<'a>;

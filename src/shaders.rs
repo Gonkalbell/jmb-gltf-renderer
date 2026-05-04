@@ -2,7 +2,7 @@
 //
 // ^ wgsl_bindgen version 0.22.2
 // Changes made to this file will not be saved.
-// SourceHash: 83ce98a3b55375e56f6c4c7a7a48275184b18299874f8ec2c35f78f8a5a864b4
+// SourceHash: 50a543e09f621d0386d2682a92bc39c77854bd853cb0842ae6d5a0f8996eaee2
 
 #![allow(unused, non_snake_case, non_camel_case_types, non_upper_case_globals)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -91,6 +91,11 @@ pub mod layout_asserts {
         assert!(std::mem::offset_of!(bgroup_camera::Camera, world_to_proj) == 256);
         assert!(std::mem::offset_of!(bgroup_camera::Camera, proj_to_world) == 320);
         assert!(std::mem::size_of::<bgroup_camera::Camera>() == 384);
+    };
+    const SCENE_MATERIAL_ASSERTS: () = {
+        assert!(std::mem::offset_of!(scene::Material, base_color_factor) == 0);
+        assert!(std::mem::offset_of!(scene::Material, alpha_cutoff) == 16);
+        assert!(std::mem::size_of::<scene::Material>() == 32);
     };
     const SCENE_INSTANCE_ASSERTS: () = {
         assert!(std::mem::offset_of!(scene::Instance, local_to_world) == 0);
@@ -205,6 +210,8 @@ pub mod bytemuck_impls {
     use super::{_root, _root::*};
     unsafe impl bytemuck::Zeroable for bgroup_camera::Camera {}
     unsafe impl bytemuck::Pod for bgroup_camera::Camera {}
+    unsafe impl bytemuck::Zeroable for scene::Material {}
+    unsafe impl bytemuck::Pod for scene::Material {}
     unsafe impl bytemuck::Zeroable for scene::Instance {}
     unsafe impl bytemuck::Pod for scene::Instance {}
     unsafe impl bytemuck::Zeroable for scene::VertexInput {}
@@ -212,6 +219,44 @@ pub mod bytemuck_impls {
 }
 pub mod scene {
     use super::{_root, _root::*};
+    #[repr(C, align(16))]
+    #[derive(Debug, PartialEq, Clone, Copy, serde :: Serialize, serde :: Deserialize)]
+    pub struct Material {
+        #[doc = "offset: 0, size: 16, type: `vec4<f32>`"]
+        pub base_color_factor: glam::Vec4,
+        #[doc = "offset: 16, size: 4, type: `f32`"]
+        pub alpha_cutoff: f32,
+        pub _pad_alpha_cutoff: [u8; 0xC],
+    }
+    impl Material {
+        pub const fn new(base_color_factor: glam::Vec4, alpha_cutoff: f32) -> Self {
+            Self {
+                base_color_factor,
+                alpha_cutoff,
+                _pad_alpha_cutoff: [0; 0xC],
+            }
+        }
+    }
+    #[repr(C)]
+    #[derive(Debug, PartialEq, Clone, Copy)]
+    pub struct MaterialInit {
+        pub base_color_factor: glam::Vec4,
+        pub alpha_cutoff: f32,
+    }
+    impl MaterialInit {
+        pub fn build(&self) -> Material {
+            Material {
+                base_color_factor: self.base_color_factor,
+                alpha_cutoff: self.alpha_cutoff,
+                _pad_alpha_cutoff: [0; 0xC],
+            }
+        }
+    }
+    impl From<MaterialInit> for Material {
+        fn from(data: MaterialInit) -> Self {
+            data.build()
+        }
+    }
     #[repr(C, align(16))]
     #[derive(Debug, PartialEq, Clone, Copy, serde :: Serialize, serde :: Deserialize)]
     pub struct Instance {
@@ -366,23 +411,39 @@ pub mod scene {
     }
     #[derive(Debug)]
     pub struct WgpuBindGroup1EntriesParams<'a> {
-        pub res_instances: wgpu::BufferBinding<'a>,
+        pub material_data: wgpu::BufferBinding<'a>,
+        pub base_color_texture: &'a wgpu::TextureView,
+        pub base_color_sampler: &'a wgpu::Sampler,
     }
     #[derive(Clone, Debug)]
     pub struct WgpuBindGroup1Entries<'a> {
-        pub res_instances: wgpu::BindGroupEntry<'a>,
+        pub material_data: wgpu::BindGroupEntry<'a>,
+        pub base_color_texture: wgpu::BindGroupEntry<'a>,
+        pub base_color_sampler: wgpu::BindGroupEntry<'a>,
     }
     impl<'a> WgpuBindGroup1Entries<'a> {
         pub fn new(params: WgpuBindGroup1EntriesParams<'a>) -> Self {
             Self {
-                res_instances: wgpu::BindGroupEntry {
+                material_data: wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(params.res_instances),
+                    resource: wgpu::BindingResource::Buffer(params.material_data),
+                },
+                base_color_texture: wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(params.base_color_texture),
+                },
+                base_color_sampler: wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(params.base_color_sampler),
                 },
             }
         }
-        pub fn into_array(self) -> [wgpu::BindGroupEntry<'a>; 1] {
-            [self.res_instances]
+        pub fn into_array(self) -> [wgpu::BindGroupEntry<'a>; 3] {
+            [
+                self.material_data,
+                self.base_color_texture,
+                self.base_color_sampler,
+            ]
         }
         pub fn collect<B: FromIterator<wgpu::BindGroupEntry<'a>>>(self) -> B {
             self.into_array().into_iter().collect()
@@ -395,15 +456,37 @@ pub mod scene {
             wgpu::BindGroupLayoutDescriptor {
                 label: Some("Scene::BindGroup1::LayoutDescriptor"),
                 entries: &[
-                    #[doc = " @binding(0): \"res_instances\""]
+                    #[doc = " @binding(0): \"material_data\""]
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: None,
+                            min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<
+                                _root::scene::Material,
+                            >(
+                            )
+                                as _),
                         },
+                        count: None,
+                    },
+                    #[doc = " @binding(2): \"base_color_texture\""]
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    #[doc = " @binding(1): \"base_color_sampler\""]
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -425,6 +508,67 @@ pub mod scene {
             pass.set_bind_group(1, &self.0, &[]);
         }
     }
+    #[derive(Debug)]
+    pub struct WgpuBindGroup2EntriesParams<'a> {
+        pub res_instances: wgpu::BufferBinding<'a>,
+    }
+    #[derive(Clone, Debug)]
+    pub struct WgpuBindGroup2Entries<'a> {
+        pub res_instances: wgpu::BindGroupEntry<'a>,
+    }
+    impl<'a> WgpuBindGroup2Entries<'a> {
+        pub fn new(params: WgpuBindGroup2EntriesParams<'a>) -> Self {
+            Self {
+                res_instances: wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(params.res_instances),
+                },
+            }
+        }
+        pub fn into_array(self) -> [wgpu::BindGroupEntry<'a>; 1] {
+            [self.res_instances]
+        }
+        pub fn collect<B: FromIterator<wgpu::BindGroupEntry<'a>>>(self) -> B {
+            self.into_array().into_iter().collect()
+        }
+    }
+    #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
+    pub struct WgpuBindGroup2(pub wgpu::BindGroup);
+    impl WgpuBindGroup2 {
+        pub const LAYOUT_DESCRIPTOR: wgpu::BindGroupLayoutDescriptor<'static> =
+            wgpu::BindGroupLayoutDescriptor {
+                label: Some("Scene::BindGroup2::LayoutDescriptor"),
+                entries: &[
+                    #[doc = " @binding(0): \"res_instances\""]
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            };
+        pub fn get_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+            device.create_bind_group_layout(&Self::LAYOUT_DESCRIPTOR)
+        }
+        pub fn from_bindings(device: &wgpu::Device, bindings: WgpuBindGroup2Entries) -> Self {
+            let bind_group_layout = Self::get_bind_group_layout(device);
+            let entries = bindings.into_array();
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Scene::BindGroup2"),
+                layout: &bind_group_layout,
+                entries: &entries,
+            });
+            Self(bind_group)
+        }
+        pub fn set(&self, pass: &mut impl SetBindGroup) {
+            pass.set_bind_group(2, &self.0, &[]);
+        }
+    }
     #[doc = " Bind groups can be set individually using their set(render_pass) method, or all at once using `WgpuBindGroups::set`."]
     #[doc = " For optimal performance with many draw calls, it's recommended to organize bindings into bind groups based on update frequency:"]
     #[doc = "   - Bind group 0: Least frequent updates (e.g. per frame resources)"]
@@ -435,19 +579,21 @@ pub mod scene {
     pub struct WgpuBindGroups<'a> {
         pub bind_group0: &'a bgroup_camera::WgpuBindGroup0,
         pub bind_group1: &'a WgpuBindGroup1,
+        pub bind_group2: &'a WgpuBindGroup2,
     }
     impl<'a> WgpuBindGroups<'a> {
         pub fn set(&self, pass: &mut impl SetBindGroup) {
             self.bind_group0.set(pass);
             self.bind_group1.set(pass);
+            self.bind_group2.set(pass);
         }
     }
     #[derive(Debug)]
     pub struct WgpuPipelineLayout;
     impl WgpuPipelineLayout {
         pub fn bind_group_layout_entries(
-            entries: [wgpu::BindGroupLayout; 2],
-        ) -> [wgpu::BindGroupLayout; 2] {
+            entries: [wgpu::BindGroupLayout; 3],
+        ) -> [wgpu::BindGroupLayout; 3] {
             entries
         }
     }
@@ -459,6 +605,7 @@ pub mod scene {
                     device,
                 )),
                 Some(&WgpuBindGroup1::get_bind_group_layout(device)),
+                Some(&WgpuBindGroup2::get_bind_group_layout(device)),
             ],
             immediate_size: 0u32,
         })
@@ -478,6 +625,11 @@ struct CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX {
     proj_to_local: mat4x4<f32>,
     world_to_proj: mat4x4<f32>,
     proj_to_world: mat4x4<f32>,
+}
+
+struct Material {
+    base_color_factor: vec4<f32>,
+    alpha_cutoff: f32,
 }
 
 struct Instance {
@@ -507,6 +659,12 @@ const AMBIENT_COLOR: vec3<f32> = vec3(0.1f);
 @group(0) @binding(0) 
 var<uniform> res_cameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX: CameraX_naga_oil_mod_XMJTXE33VOBPWGYLNMVZGCX;
 @group(1) @binding(0) 
+var<uniform> material_data: Material;
+@group(1) @binding(2) 
+var base_color_texture: texture_2d<f32>;
+@group(1) @binding(1) 
+var base_color_sampler: sampler;
+@group(2) @binding(0) 
 var<storage> res_instances: array<Instance>;
 
 @vertex 

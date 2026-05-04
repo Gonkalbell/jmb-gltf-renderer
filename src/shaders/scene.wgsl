@@ -1,10 +1,19 @@
 #import bgroup_camera::res_camera
 
+struct Material {
+    base_color_factor: vec4f,
+    alpha_cutoff: f32,
+};
+
+@group(1) @binding(0) var<uniform> material_data: Material;
+@group(1) @binding(2) var base_color_texture: texture_2d<f32>;
+@group(1) @binding(1) var base_color_sampler: sampler;
+
 struct Instance {
     local_to_world: mat4x4f,
     normal_local_to_world: mat4x4f,
 }
-@group(1) @binding(0) var<storage> res_instances : array<Instance>;
+@group(2) @binding(0) var<storage> res_instances: array<Instance>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -14,10 +23,8 @@ struct VertexInput {
     @location(4) texcoord_1: vec2<f32>,
     @location(5) color_0: vec4<f32>,
     @location(6) color_1: vec4<f32>,
-    // @location(5) joints_0: vec4<f32>,
-    // @location(7) joints_1: vec4<f32>,
-    // @location(5) weights_0: vec4<f32>,
-    // @location(8) weights_1: vec4<f32>,
+    // @location(7) joints_0: vec4<f32>,
+    // @location(8) joints_1: vec4<f32>,
 };
 
 struct VertexOutput {
