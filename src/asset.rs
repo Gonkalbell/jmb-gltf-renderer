@@ -150,15 +150,17 @@ pub async fn load_asset(
         })
         .collect();
 
-    let buffer_slices: Vec<_> = doc
+    let mut buffer_slices: Vec<_> = doc
         .views()
         .map(|doc_view: gltf::buffer::View| {
-            buffers[doc_view.buffer().index()].slice(
+            OwnedBufferSlice::from_slice(&buffers[doc_view.buffer().index()].slice(
                 doc_view.offset() as wgpu::BufferAddress
                     ..(doc_view.offset() + doc_view.length()) as wgpu::BufferAddress,
-            )
+            ))
         })
         .collect();
+
+    fixup_u8_index_buffers(&doc, &buffer_contents, &buffers, &mut buffer_slices, device);
 
     let textures = generate_textures(
         &url,
@@ -240,7 +242,7 @@ pub async fn load_asset(
 
     let defualt_material_data = scene::Material {
         base_color_factor: glam::Vec4::ONE,
-        alpha_cutoff: 0.,
+        alpha_cutoff: 0.5,
         _pad_alpha_cutoff: Default::default(),
     };
     let default_material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -301,6 +303,38 @@ pub async fn load_asset(
         pipeline_batches,
         instance_bgroup,
     })
+}
+
+// wgpu does not allow index buffers to be u8s, so I create new u16 index buffers for them.
+fn fixup_u8_index_buffers(
+    doc: &gltf::Document,
+    buffer_contents: &[Vec<u8>],
+    buffers: &[wgpu::Buffer],
+    buffer_slices: &mut [OwnedBufferSlice],
+    device: &wgpu::Device,
+) {
+    for accessor in doc.accessors() {
+        use gltf::{accessor::DataType, buffer::Target};
+        if let Some(view) = accessor.view()
+            && let Some(Target::ElementArrayBuffer) = view.target()
+            && accessor.data_type() == DataType::U8
+            && buffer_slices[view.index()].buffer == buffers[view.buffer().index()]
+        {
+            let start = view.offset();
+            let end = start + view.length();
+            let u8_contents = &buffer_contents[view.buffer().index()][start..end];
+            let u16_contents: Vec<u16> = u8_contents.iter().map(|&b| b as u16).collect();
+
+            let u16_index_buffers = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: accessor.name(),
+                contents: bytemuck::cast_slice(&u16_contents),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::INDEX,
+            });
+
+            buffer_slices[view.index()] =
+                OwnedBufferSlice::from_slice(&u16_index_buffers.slice(..));
+        }
+    }
 }
 
 async fn request_data(
@@ -589,7 +623,7 @@ fn generate_meshes(
     device: &wgpu::Device,
     doc: &gltf::Document,
     color_format: wgpu::TextureFormat,
-    buffer_slices: &[wgpu::BufferSlice],
+    buffer_slices: &[OwnedBufferSlice],
     mesh_instances: &HashMap<MeshIndex, Range<u32>>,
     materials: &[bind_groups::Material],
     default_material_bgroup: &bind_groups::Material,
@@ -659,7 +693,7 @@ fn generate_meshes(
                 let format = get_vertex_format(&accessor);
                 let accessor_end = accessor.offset() as wgpu::BufferAddress + format.size();
                 let array_stride = view.stride().map(|s| s as _).unwrap_or(format.size());
-                let buf_slice = buffer_slices[view.index()];
+                let buf_slice = buffer_slices[view.index()].as_slice();
 
                 let (offset, buf_slice) = if accessor_end <= array_stride {
                     (accessor.offset() as _, buf_slice)
@@ -712,19 +746,21 @@ fn generate_meshes(
             };
 
             let mut draw_count = vertex_count as u32;
-            let index_data = doc_primitive.indices().map(|indices| {
+            let index_data = doc_primitive.indices().map(|doc_indices| {
                 use gltf::accessor::DataType;
-                draw_count = indices.count() as _;
+                draw_count = doc_indices.count() as _;
+                let buffer_view = &buffer_slices[doc_indices.view().unwrap().index()].as_slice();
+                let (format, offset_multiplier) = match doc_indices.data_type() {
+                    // We replaced all u8 index buffers with u16s
+                    DataType::U8 => (wgpu::IndexFormat::Uint16, 2),
+                    DataType::U16 => (wgpu::IndexFormat::Uint16, 1),
+                    DataType::U32 => (wgpu::IndexFormat::Uint32, 1),
+                    t => unimplemented!("Index type {:?} is not supported", t),
+                };
+                let offset = offset_multiplier * doc_indices.offset() as wgpu::BufferAddress;
                 PrimitiveIndexData {
-                    buffer_slice: OwnedBufferSlice::from_slice(
-                        &buffer_slices[indices.view().unwrap().index()]
-                            .slice(indices.offset() as wgpu::BufferAddress..),
-                    ),
-                    format: match indices.data_type() {
-                        DataType::U16 => wgpu::IndexFormat::Uint16,
-                        DataType::U32 => wgpu::IndexFormat::Uint32,
-                        t => unimplemented!("Index type {:?} is not supported", t),
-                    },
+                    buffer_slice: OwnedBufferSlice::from_slice(&buffer_view.slice(offset..)),
+                    format,
                 }
             });
 
