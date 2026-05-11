@@ -86,12 +86,12 @@ impl ArcBallCameraParams {
         let clipspace_pointer_delta = Vec2::new(1., -1.) * (pointer_delta / screen_size);
 
         if input.pointer.primary_down() {
-            let pitch_delta = clipspace_pointer_delta.y * self.fov_y_revs;
+            let pitch_delta = -clipspace_pointer_delta.y * self.fov_y_revs;
             self.pitch_revs = (self.pitch_revs + pitch_delta).clamp(-0.25, 0.25);
 
             let fov_x_revs =
                 2. * ((TAU * self.fov_y_revs / 2.).tan() * self.aspect_ratio).atan() / TAU;
-            let yaw_delta = -clipspace_pointer_delta.x * fov_x_revs;
+            let yaw_delta = clipspace_pointer_delta.x * fov_x_revs;
             self.yaw_revs = (self.yaw_revs + yaw_delta).rem_euclid(1.);
         }
 
