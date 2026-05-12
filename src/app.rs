@@ -283,20 +283,24 @@ impl eframe::App for RendererApp {
             });
         });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            ui.painter()
-                .add(eframe::egui_wgpu::Callback::new_paint_callback(
-                    ui.viewport_rect(),
-                    RenderCallback {
-                        camera: self.camera.clone(),
-                        skybox: self.skybox.clone(),
-                        asset: self.asset.clone(),
-                    },
-                ));
-        });
+        let response = egui::CentralPanel::default()
+            .show_inside(ui, |ui| {
+                ui.painter()
+                    .add(eframe::egui_wgpu::Callback::new_paint_callback(
+                        ui.viewport_rect(),
+                        RenderCallback {
+                            camera: self.camera.clone(),
+                            skybox: self.skybox.clone(),
+                            asset: self.asset.clone(),
+                        },
+                    ));
+            })
+            .response;
 
         let ctx = ui.ctx();
-        if !ctx.egui_wants_keyboard_input() && !ctx.egui_wants_pointer_input() {
+        if !ctx.egui_wants_keyboard_input()
+            && (!ctx.egui_wants_pointer_input() || response.hovered())
+        {
             ctx.input(|input| {
                 self.camera.params.update(input);
             });
